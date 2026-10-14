@@ -93,8 +93,7 @@ export async function migrate(db: Db): Promise<string[]> {
   const files = await migrationFiles();
   if ("pool" in db) return migratePostgres(db as Db & { pool: import("pg").Pool }, files);
   const ran: string[] = [];
-  // Serialize deploys and make each schema change plus its ledger entry atomic. A failed
-  // migration rolls back instead of leaving half-applied DDL on a live Postgres database.
+  // PGlite keeps local/test migrations and their ledger entries atomic.
   await db.transaction(async (tx) => {
     await tx.query("select pg_advisory_xact_lock(790287316)");
     await tx.query("create table if not exists schema_migrations (name text primary key, applied_at timestamptz not null default now())");

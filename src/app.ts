@@ -130,7 +130,7 @@ export function createApp(deps: AppDeps) {
     return c.json(result, result.ok ? 200 : 500);
   });
 
-  // For an uptime monitor: 503 when the database is unreachable or the scheduler stopped or is failing.
+  // For an uptime monitor: 503 when the database, scheduler or staff alert delivery needs attention.
   app.get("/healthz", async (c) => {
     try {
       const health = await schedulerHealth(db, now());
