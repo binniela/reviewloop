@@ -43,11 +43,11 @@ describe("staff sign-in", () => {
 
   it("rejects a wrong password and signs in with the right one", async () => {
     const { app } = await setup();
-    const bad = await app.request("/login", { method: "POST", body: new URLSearchParams({ user: "raj", password: "nope", next: "/issues" }) });
+    const bad = await app.request("/login", { method: "POST", headers: { Origin: "http://localhost" }, body: new URLSearchParams({ user: "raj", password: "nope", next: "/issues" }) });
     expect(bad.status).toBe(401);
     expect(bad.headers.get("set-cookie")).toBeNull();
 
-    const ok = await app.request("/login", { method: "POST", body: new URLSearchParams({ user: "raj", password: "pw", next: "/metrics" }) });
+    const ok = await app.request("/login", { method: "POST", headers: { Origin: "http://localhost" }, body: new URLSearchParams({ user: "raj", password: "pw", next: "/metrics" }) });
     expect(ok.status).toBe(302);
     expect(ok.headers.get("location")).toBe("/metrics");
     const cookie = ok.headers.get("set-cookie")!;
@@ -58,7 +58,7 @@ describe("staff sign-in", () => {
 
   it("only redirects to paths on this site after sign-in", async () => {
     const { app } = await setup();
-    const res = await app.request("/login", { method: "POST", body: new URLSearchParams({ user: "raj", password: "pw", next: "//evil.example" }) });
+    const res = await app.request("/login", { method: "POST", headers: { Origin: "http://localhost" }, body: new URLSearchParams({ user: "raj", password: "pw", next: "//evil.example" }) });
     expect(res.headers.get("location")).toBe("/issues");
   });
 
