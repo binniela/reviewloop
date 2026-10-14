@@ -7,7 +7,7 @@ Guest texting, service recovery, and review management for independent hotels on
 
 ## Quick start
 
-Needs Node 22.12 or newer (or a supported newer Node LTS).
+Needs Node 24 (`.nvmrc`; what Vercel and CI run).
 
 ```bash
 npm install
@@ -78,6 +78,8 @@ Everyone has their own account, with one of two roles:
 
 Public: `/checkin/:propertyId` (opt-in page), `/webhooks/twilio/sms` (Twilio, signature-checked).
 Machine: `GET /cron/tick` and `POST /api/ingest/:propertyId?kind=...` with `Authorization: Bearer $CRON_SECRET`.
+Health: public `GET /health` checks database and migrations; `GET /health/alerts` uses
+`Authorization: Bearer $MONITOR_TOKEN` and returns 503 for critical operational alerts.
 
 ## Apps: web, Mac, Windows, Chrome
 
@@ -124,6 +126,7 @@ vercel deploy --prod
 ```
 
 `api/index.ts` serves the app; `public/` (icons, manifest, service worker) is served by Vercel's CDN.
+See [the launch plan](docs/LAUNCH.md) and [incident runbook](docs/RUNBOOK.md) for deployment and response steps.
 
 - **No `DATABASE_URL`: demo mode.** Two sample hotels in an in-memory database, mock Google,
   messages printed, sign in with `demo` / `demo` (GM) or
@@ -131,7 +134,7 @@ vercel deploy --prod
   resets when it restarts. Good for showing the product; not for a hotel.
 - **For real:** set `DATABASE_URL` (Supabase pooler URL), `ADMIN_PASSWORD`, `CRON_SECRET`,
   `PUBLIC_URL`, `MESSAGING_MODE=live`, and the Twilio and Google credentials. Startup refuses to
-  run in production without them.
+  run in production without them, and refuses `MESSAGING_MODE=live` on preview deployments.
 - **Scheduler:** something has to call `GET /cron/tick` with `Authorization: Bearer $CRON_SECRET`
   every 5 minutes (escalations wait on it). See the launch checklist below for Vercel Pro vs Hobby.
 
@@ -278,7 +281,7 @@ db/migrations/    schema
 
 ## Backend reliability and operations
 
-The safety migration `003_reliability.sql` runs through the existing migration runner on startup.
+The safety migration `003_reliability.sql` runs through the explicit migration command before deployment.
 It changes existing and new properties to `approval_all`; re-enable automatic replies only after
 validating them for that hotel. Matching a public review by name/date never permits private
 stay notes in a draft. Template replies do not claim a happy stay when the text describes problems.

@@ -2,12 +2,15 @@ import { caseHistory, conversationHistory, unmatchedMessages } from "./inbox.js"
 import { recordDelivery } from "./delivery.js";
 import { pilotFunnel } from "./operations.js";
 import { dispatchOutbox } from "./outbox.js";
-import { createHmac, randomUUID } from "node:crypto";
+import { createHash, createHmac, timingSafeEqual } from "node:crypto";
+import { alertStatus, schedulerAlert } from "./alerts.js";
+import { log } from "./log.js";
+import { acquireLease, lastTick, recordTick } from "./scheduler.js";
 import { Hono, type Context } from "hono";
 import { deleteCookie, getSignedCookie, setSignedCookie } from "hono/cookie";
 import { html } from "hono/html";
 import { approveConsent, linkPendingConsents, recordConsent } from "./consent.js";
-import type { Db } from "./db.js";
+import { pendingMigrations, type Db } from "./db.js";
 import { classifierFromEnv, type Classifier } from "./inbound/classify.js";
 import { acknowledgeCase, replyToGuest, resolveCase, runCaseTimers } from "./inbound/cases.js";
 import { handleInbound } from "./inbound/handle.js";
@@ -64,6 +67,8 @@ export interface AppDeps {
   downloads?: Downloads;
   /** Minutes without activity before a shared front-desk PC goes back to the name picker. */
   deskIdleMinutes?: number;
+  monitorToken?: string;
+  schedulerExpected?: boolean;
 }
 
 export interface Downloads {
@@ -118,7 +123,7 @@ export function createApp(deps: AppDeps) {
 
   // ---------- Machine endpoints (bearer token; Vercel Cron sends "Authorization: Bearer $CRON_SECRET")
   const requireSecret = async (c: Context<Env>, next: () => Promise<void>) => {
-    if (!deps.cronSecret || c.req.header("authorization") !== `Bearer ${deps.cronSecret}`) {
+    if (!deps.cronSecret || !bearerMatches(c.req.header("authorization"), deps.cronSecret)) {
       return c.json({ error: "unauthorized" }, 401);
     }
     await next();
@@ -127,6 +132,7 @@ export function createApp(deps: AppDeps) {
   // A failed step answers 500 so Vercel's cron log shows the run as failed; details are on Operations.
   app.get("/cron/tick", requireSecret, async (c) => {
     const result = await tick(deps);
+    if ("skipped" in result) return c.json(result, 200);
     return c.json(result, result.ok ? 200 : 500);
   });
 
@@ -140,6 +146,28 @@ export function createApp(deps: AppDeps) {
     } catch {
       return c.json({ db: "error" }, 503);
     }
+  });
+
+  // ---------- Health. /health is public and cheap: for the uptime monitor and load balancers.
+  // It says only whether the app can serve; /health/alerts says whether it's doing its job.
+  const alertOptions = { scheduler: deps.schedulerExpected ?? !!deps.cronSecret };
+  app.get("/health", async (c) => {
+    const commit = process.env.VERCEL_GIT_COMMIT_SHA?.slice(0, 7) ?? null;
+    try {
+      const pending = await pendingMigrations(db);
+      const ok = pending.length === 0;
+      return c.json({ ok, database: "ok", migrations: ok ? "current" : `${pending.length} pending`, commit }, ok ? 200 : 503);
+    } catch (err) {
+      log.error("health.db_failed", { error: err });
+      return c.json({ ok: false, database: "unreachable", commit }, 503);
+    }
+  });
+  app.get("/health/alerts", async (c) => {
+    const tokens = [deps.monitorToken, deps.cronSecret].filter((t): t is string => !!t);
+    if (!tokens.some((t) => bearerMatches(c.req.header("authorization"), t))) return c.json({ error: "unauthorized" }, 401);
+    const status = await alertStatus(db, now(), alertOptions);
+    if (!status.ok) log.warn("health.alerts", { codes: status.alerts.map((a) => a.code) });
+    return c.json({ ...status, checkedAt: now().toISOString() }, status.ok ? 200 : 503);
   });
 
   app.post("/api/ingest/:propertyId", requireSecret, async (c) => {
@@ -409,7 +437,9 @@ export function createApp(deps: AppDeps) {
          join properties p on p.id = s.property_id
         where c.resolved_at is null and c.acknowledged_at is null order by c.opened_at desc limit 1`,
     );
-    const problems = (await problemCounts(db, now())).total;
+    // A silent scheduler counts too: nothing else on the console would show it.
+    const scheduler = alertOptions.scheduler ? await schedulerAlert(db, now()) : null;
+    const problems = (await problemCounts(db, now())).total + (scheduler ? 1 : 0);
     return c.json({
       ...counts,
       problems,
@@ -638,7 +668,10 @@ export function createApp(deps: AppDeps) {
 
   app.get("/metrics", async (c) => c.html(await metricsPage(db, now())));
 
-  app.get("/operations", async (c) => c.html(await operationsPage(db, now())));
+  app.get("/operations", async (c) => {
+    const { alerts } = await alertStatus(db, now(), alertOptions);
+    return c.html(await operationsPage(db, now(), alerts, await lastTick(db)));
+  });
 
   app.get("/setup", async (c) => {
     const props = await listProperties(db);
@@ -865,19 +898,22 @@ export function createApp(deps: AppDeps) {
 export const TICK_LEASE_SECONDS = 120;
 
 /** One scheduler pass: apply events, send due messages, escalations and follow-ups, sync reviews. */
+/** Constant-time check of an "Authorization: Bearer ..." header. */
+export function bearerMatches(header: string | undefined, secret: string) {
+  const digest = (v: string) => createHash("sha256").update(v).digest();
+  return !!header && timingSafeEqual(digest(header), digest(`Bearer ${secret}`));
+}
+
+/**
+ * One pass of scheduled work. Two can start at once (a slow tick overlapping the next cron call, or
+ * two schedulers configured during a migration between them): the lease lets one run and the other
+ * return straight away. Each worker also claims its own rows, so even an expired lease can't double-send.
+ */
 export async function tick(deps: AppDeps) {
   const now = deps.now?.() ?? new Date();
-  // Cron can fire twice or start while a slow run is still going. One tick at a time; the other
-  // returns straight away. A crashed tick's lease expires, so the next run isn't blocked for long.
-  const token = randomUUID();
-  const [lease] = await deps.db.query(
-    `insert into sync_state (key, value, updated_at) values ('lease:tick', $1, $2)
-     on conflict (key) do update set value = excluded.value, updated_at = excluded.updated_at
-       where sync_state.updated_at < $2::timestamptz - make_interval(secs => $3::double precision)
-     returning key`,
-    [token, now.toISOString(), TICK_LEASE_SECONDS],
-  );
-  if (!lease) return { ok: true, skipped: "another tick is running" as const };
+  const release = await acquireLease(deps.db, "tick", TICK_LEASE_SECONDS * 1_000, now);
+  if (!release) return { skipped: true as const, reason: "another tick is running" };
+  const started = performance.now();
 
   // Each step runs even if an earlier one failed; failures are recorded for Operations.
   const errors: string[] = [];
@@ -895,25 +931,35 @@ export async function tick(deps: AppDeps) {
     const reviews: Record<string, unknown> = {};
     for (const p of (await step("reviews", () => listProperties(deps.db))) ?? []) {
       if (!deps.source.supports(p)) continue;
+      const key = `reviews:${p.id}`;
+      const [previous] = await deps.db.query<{ value: string }>("select value from sync_state where key = $1", [key]);
+      let lastOk: string | undefined;
+      try { lastOk = previous ? (JSON.parse(previous.value) as { lastOk?: string }).lastOk : undefined; } catch {}
       try {
         const result = await syncReviews(deps.db, p.id, { ...deps, deadline });
         reviews[p.id] = result;
         await deps.db.query(`insert into sync_state (key, value, updated_at) values ($1, $2, $3)
           on conflict (key) do update set value = excluded.value, updated_at = excluded.updated_at`,
-          [`reviews:${p.id}`, JSON.stringify({ lastAttempt: now, ok: result.errors.length === 0, errors: result.errors }), now.toISOString()]);
+          [key, JSON.stringify({ lastAttempt: now, ok: result.errors.length === 0, errors: result.errors, lastOk: result.errors.length === 0 ? now : lastOk }), now.toISOString()]);
       } catch (err) {
         reviews[p.id] = { error: (err as Error).message };
         await step("reviews", () => deps.db.query(`insert into sync_state (key, value, updated_at) values ($1, $2, $3)
           on conflict (key) do update set value = excluded.value, updated_at = excluded.updated_at`,
-          [`reviews:${p.id}`, JSON.stringify({ lastAttempt: now, ok: false, error: (err as Error).message }), now.toISOString()]));
+          [key, JSON.stringify({ lastAttempt: now, ok: false, error: (err as Error).message, lastOk }), now.toISOString()]));
       }
     }
     await deps.db.query(`insert into sync_state (key, value, updated_at) values ('scheduler', $1, $2)
       on conflict (key) do update set value = excluded.value, updated_at = excluded.updated_at`,
       [JSON.stringify({ ok: errors.length === 0, errors }), now.toISOString()]);
-    return { ok: errors.length === 0, errors, events, jobs, cases, reviews, outbound };
+    const ok = errors.length === 0;
+    await recordTick(deps.db, { ok, startedAt: now.toISOString(), ms: Math.round(performance.now() - started), error: errors.join("; ") || undefined }, now);
+    return { ok, errors, events, jobs, cases, reviews, outbound };
+  } catch (err) {
+    await recordTick(deps.db, { ok: false, startedAt: now.toISOString(), ms: Math.round(performance.now() - started), error: (err as Error).message }, now).catch(() => {});
+    log.error("tick.failed", { name: err instanceof Error ? err.name : "unknown" });
+    throw err;
   } finally {
-    await deps.db.query("delete from sync_state where key = 'lease:tick' and value = $1", [token]).catch(() => {});
+    await release().catch(() => {});
   }
 }
 

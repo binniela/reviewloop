@@ -5,15 +5,19 @@ import { seedDemo } from "./demo.js";
 import { messengerFromEnv } from "./messaging.js";
 import { drafterFromEnv } from "./reviews/drafter.js";
 import { reviewSourceFromEnv } from "./reviews/sources.js";
+import { log } from "./log.js";
 import { validateRuntime } from "./runtime.js";
 
 /**
  * Demo mode: an in-memory database seeded with two sample hotels, mock Google, printed messages,
- * and a demo/demo login. On by default for a Vercel deployment with no DATABASE_URL, so a fresh
- * deploy shows the product instead of crashing; set DATABASE_URL to run it for real.
+ * and a demo/demo login. On by default for Vercel preview deployments with no DATABASE_URL, so a
+ * branch deploy shows the product instead of crashing. A production deployment must ask for it
+ * with REVIEWLOOP_DEMO=1: a hotel's console silently turning into a demo/demo sandbox because
+ * DATABASE_URL went missing would lose every guest text sent to it.
  */
 export const demoMode = (env = process.env) =>
-  env.REVIEWLOOP_DEMO === "1" || (!!env.VERCEL && !env.DATABASE_URL && env.REVIEWLOOP_DEMO !== "0");
+  env.REVIEWLOOP_DEMO === "1" ||
+  (!!env.VERCEL && !env.DATABASE_URL && env.REVIEWLOOP_DEMO !== "0" && env.VERCEL_ENV !== "production");
 
 export async function buildDeps(env = process.env): Promise<AppDeps> {
   // Installer links on /welcome: https only, so a typo can't become a broken or unsafe link.
@@ -36,12 +40,15 @@ export async function buildDeps(env = process.env): Promise<AppDeps> {
       publicUrl: env.PUBLIC_URL,
       downloads,
       deskIdleMinutes,
+      schedulerExpected: false,
     };
   }
   validateRuntime(env);
+  const started = performance.now();
   const db = await openFromEnv();
   if (env.DATABASE_URL) await assertMigrated(db);
   else await migrate(db);
+  log.info("boot", { env: env.VERCEL_ENV ?? env.NODE_ENV ?? "development", ms: Math.round(performance.now() - started) });
   return {
     db,
     messenger: messengerFromEnv(env),
@@ -55,6 +62,7 @@ export async function buildDeps(env = process.env): Promise<AppDeps> {
     allowUnsignedWebhooks: env.ALLOW_UNSIGNED_WEBHOOKS === "1",
     downloads,
     deskIdleMinutes,
+    monitorToken: env.MONITOR_TOKEN,
   };
 }
 

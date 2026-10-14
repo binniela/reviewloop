@@ -1,0 +1,45 @@
+# Typecheck and tests on every pull request and every push to main. Make "test" a required check
+# in the branch protection rule for main (see docs/LAUNCH.md). Preview deploys come from Vercel's
+# GitHub integration, not from here.
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    services:
+      # A real Postgres for the tests PGlite can't do (several instances migrating at once).
+      postgres:
+        image: postgres:17
+        env:
+          POSTGRES_PASSWORD: postgres
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd pg_isready --health-interval 5s --health-timeout 5s --health-retries 10
+    env:
+      TEST_DATABASE_URL: postgres://postgres:postgres@localhost:5432/postgres
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with:
+          node-version-file: .nvmrc
+          cache: npm
+      - run: npm ci
+      - run: npm run typecheck
+      - run: npm test
+      - name: Chrome extension packages
+        run: |
+          node -e "JSON.parse(require('fs').readFileSync('extension/manifest.json', 'utf8'))"
+          npm run extension:zip

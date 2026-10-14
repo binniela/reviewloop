@@ -3,6 +3,8 @@ import { DateTime } from "luxon";
 import type { Db } from "../db.js";
 import { listProperties } from "../properties.js";
 import { layout, timeAgo } from "./layout.js";
+import type { Alert } from "../alerts.js";
+import type { TickBeat } from "../scheduler.js";
 
 /**
  * Operations: is everything that runs on its own actually running? Report freshness, the Google
@@ -87,8 +89,7 @@ export async function problemCounts(db: Db, now: Date) {
   return { ...counts, total: Object.values(counts).reduce((a, b) => a + b, 0) };
 }
 
-export async function operationsPage(db: Db, now: Date) {
-  const counts = await problemCounts(db, now);
+export async function operationsPage(db: Db, now: Date, alerts: Alert[], beat: TickBeat | null) {
   const fresh = await reportFreshness(db, now);
   const sync = await db.query<{ key: string; value: string; updated_at: Date }>("select key, value, updated_at from sync_state where key like 'reviews:%'");
 
@@ -127,27 +128,21 @@ export async function operationsPage(db: Db, now: Date) {
   const status = (ok: boolean, good: string, bad: string) => (ok ? html`<span class="tag good">${good}</span>` : html`<span class="tag err">${bad}</span>`);
 
   const body = html`
-    ${counts.total === 0
-      ? scheduler.state === "never" ? "" : html`<p class="all-clear"><span class="tag good">All running</span> Texts, timers, and the Google sync have no errors right now.</p>`
-      : html`<div class="workbar">
-          ${counts.undelivered ? html`<span class="chip hot"><b>${counts.undelivered}</b> not delivered</span>` : ""}
-          ${counts.scheduler ? html`<span class="chip hot">Scheduler ${scheduler.state === "stale" ? "stopped" : "failing"}</span>` : ""}
-          ${counts.retrying ? html`<span class="chip hot"><b>${counts.retrying}</b> retrying</span>` : ""}
-          ${counts.unsent ? html`<span class="chip hot"><b>${counts.unsent}</b> not sent</span>` : ""}
-          ${counts.escalations + counts.followups ? html`<span class="chip hot"><b>${counts.escalations + counts.followups}</b> timer errors</span>` : ""}
-          ${counts.jobs ? html`<span class="chip hot"><b>${counts.jobs}</b> scheduled texts failed</span>` : ""}
-          ${counts.sync ? html`<span class="chip hot"><b>${counts.sync}</b> Google sync errors</span>` : ""}
+    ${alerts.length === 0
+      ? html`<p class="all-clear"><span class="tag good">All running</span> Texts, timers, and the Google sync have no errors right now.</p>`
+      : html`<div class="alerts">
+          ${alerts.map(
+            (a) => html`<p class="alert-line"><span class="tag ${a.severity === "critical" ? "err" : "warn"}">${a.severity === "critical" ? "Now" : "Today"}</span>
+              <strong>${a.title}</strong> <span class="muted small">${a.detail}</span></p>`,
+          )}
         </div>`}
 
     <h2>Scheduler</h2>
-    ${scheduler.state === "never"
-      ? html`<p class="banner warn" role="alert"><strong>The scheduler has never run.</strong>
-          <span>Welcome texts, GM alerts, follow-ups and review requests all wait on it. Set up the cron for /cron/tick.</span></p>`
-      : scheduler.state === "stale"
-        ? html`<p class="banner warn" role="alert"><strong>The scheduler hasn’t run for ${timeAgo(scheduler.lastRun, now).replace(/ ago$/, "")}.</strong>
-            <span>GM alerts and scheduled texts are waiting. Check the cron job.</span></p>`
-        : html`<p>${status(scheduler.state === "ok", "Running", "Last run had errors")} <span class="muted small">last run ${timeAgo(scheduler.lastRun, now)}</span></p>`}
-    ${scheduler.errors.length ? html`<ul class="err small">${scheduler.errors.map((e) => html`<li>${e}</li>`)}</ul>` : ""}
+    <p class="${beat?.ok ? "ok-line" : ""}">
+      ${beat
+        ? html`${status(beat.ok, "Running", "Last run failed")} Last run ${timeAgo(new Date(beat.startedAt), now)}${beat.ok ? "" : html` <span class="muted small">${beat.error ?? ""}</span>`}`
+        : html`<span class="muted">Hasn’t run yet. Something must call /cron/tick every 5 minutes.</span>`}
+    </p>
 
     <h2>Daily reports</h2>
     <div class="table-wrap">

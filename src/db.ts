@@ -1,6 +1,7 @@
 import { mkdir, readdir, readFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
+import { log } from "./log.js";
 
 /** Minimal database surface. Postgres in production (Supabase), PGlite in tests and local dev. */
 export interface Db {
@@ -14,13 +15,16 @@ const migrationFiles = async () => (await readdir(MIGRATIONS_DIR)).filter((f) =>
 
 /** Production requests check schema state; only the explicit migration command changes it. */
 export async function assertMigrated(db: Db): Promise<void> {
-  const files = await migrationFiles();
-  const [table] = await db.query<{ exists: string | null }>("select to_regclass('public.schema_migrations')::text as exists");
+  const pending = await pendingMigrations(db);
+  if (pending.length) throw new Error(`Database migrations pending: ${pending.join(", ")}. Run npm run migrate before serving traffic.`);
+}
+
+export async function pendingMigrations(db: Db): Promise<string[]> {
+  const [table] = await db.query<{ exists: string | null }>("select to_regclass('schema_migrations')::text as exists");
   const applied = table?.exists
     ? new Set((await db.query<{ name: string }>("select name from schema_migrations")).map((r) => r.name))
     : new Set<string>();
-  const pending = files.filter((f) => !applied.has(f));
-  if (pending.length) throw new Error(`Database migrations pending: ${pending.join(", ")}. Run npm run migrate before serving traffic.`);
+  return (await migrationFiles()).filter((f) => !applied.has(f));
 }
 
 /** Existing-table indexes are built without the write lock held by plain CREATE INDEX. */
@@ -82,6 +86,8 @@ async function migratePostgres(db: Db & { pool: import("pg").Pool }, files: stri
       }
       ran.push(file);
     }
+    await client.query("SET lock_timeout = '5s'");
+    await lockDownDataApi({ query: async <T>(sql: string, params: unknown[] = []) => (await client.query(sql, params)).rows as T[] });
     return ran;
   } finally {
     if (locked) await client.query("select pg_advisory_unlock(790287316)").catch(() => {});
@@ -89,6 +95,7 @@ async function migratePostgres(db: Db & { pool: import("pg").Pool }, files: stri
   }
 }
 
+/** Apply schema changes explicitly before deployment; PGlite keeps local migrations atomic. */
 export async function migrate(db: Db): Promise<string[]> {
   const files = await migrationFiles();
   if ("pool" in db) return migratePostgres(db as Db & { pool: import("pg").Pool }, files);
@@ -105,8 +112,19 @@ export async function migrate(db: Db): Promise<string[]> {
       await tx.query("insert into schema_migrations (name) values ($1)", [file]);
       ran.push(file);
     }
+    await lockDownDataApi(tx);
   });
   return ran;
+}
+
+/** Supabase's public Data API must not expose guest rows through the anon key. */
+async function lockDownDataApi(db: Pick<Db, "query">) {
+  const open = await db.query<{ schema: string; name: string }>(
+    `select n.nspname as schema, c.relname as name from pg_class c join pg_namespace n on n.oid = c.relnamespace
+      where n.nspname = current_schema() and c.relkind = 'r' and not c.relrowsecurity`,
+  );
+  const ident = (v: string) => `"${v.replace(/"/g, '""')}"`;
+  for (const t of open) await db.query(`alter table ${ident(t.schema)}.${ident(t.name)} enable row level security`);
 }
 
 // Both drivers accept multi-statement scripts only through their simple-query paths.
@@ -161,10 +179,13 @@ export async function openPostgres(connectionString: string): Promise<Db & { poo
   const { default: pg } = await import("pg");
   // Return dates as plain strings so DATE columns don't shift across timezones.
   pg.types.setTypeParser(1082, (v: string) => v);
-  const pool = new pg.Pool({ ...pgPoolConfig(connectionString), max: 5 });
-  // The pooler closes idle connections. Without a listener that 'error' event crashes the process;
-  // the pool discards the dead client and the next query opens a fresh one.
-  pool.on("error", (err) => console.error("postgres idle client error", err.message));
+  const pool = new pg.Pool({
+    ...pgPoolConfig(connectionString),
+    max: Number(process.env.PG_POOL_MAX ?? (process.env.VERCEL ? 3 : 5)),
+    idleTimeoutMillis: 10_000,
+    connectionTimeoutMillis: 10_000,
+  });
+  pool.on("error", (err) => log.error("db.pool_error", { error: err }));
   return {
     pool,
     async query<T>(sql: string, params: unknown[] = []) {
@@ -194,6 +215,12 @@ export async function openPostgres(connectionString: string): Promise<Db & { poo
     },
     close: () => pool.end(),
   };
+}
+
+export function withoutSslMode(connectionString: string) {
+  const url = new URL(connectionString);
+  for (const key of ["sslmode", "sslrootcert", "sslcert", "sslkey"]) url.searchParams.delete(key);
+  return url.toString();
 }
 
 /** DATABASE_URL set: Postgres. Otherwise a local PGlite database in .data/ for development. */

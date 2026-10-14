@@ -491,6 +491,10 @@ button:disabled, button[aria-busy=true] { opacity:.6; cursor:progress; box-shado
 .tag.err, .pill.err { color:var(--warn); background:var(--warn-bg); }
 .tag.good, .pill.ok { color:var(--ok); background:var(--ok-bg); }
 .tag.err::before, .tag.good::before { content:""; width:6px; height:6px; border-radius:50%; background:currentColor; }
+.tag.good { color:var(--ok); background:var(--ok-bg); border-color:transparent; }
+.tag.warn { color:var(--gold); background:var(--sunk); border-color:var(--line); }
+.alerts { display:grid; gap:8px; margin:0 0 8px; }
+.alert-line { display:flex; align-items:baseline; gap:10px; flex-wrap:wrap; margin:0; padding:12px 16px; border:1px solid var(--line); border-radius:var(--r); background:var(--surface); }
 .err { color:var(--warn); } .good { color:var(--ok); }
 .empty { padding:40px 20px; text-align:center; color:var(--muted); border:1px dashed var(--line-2); border-radius:var(--r); background:var(--surface); }
 .muted { color:var(--muted); } .small { font-size:var(--fs-md); }
