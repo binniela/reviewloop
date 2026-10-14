@@ -3,8 +3,24 @@
 Reviewed 2026-10-14. Scope: `src/app.ts`, boot and DB code, outbound delivery and consent,
 inbound handling, milestones, reviews, inbox queries, migrations, and the README. Findings
 below describe code behavior; this is not a legal certification of an SMS program.
-The checkout was being edited concurrently during this review. Findings refer to the committed
-changes through this report and do not assess later uncommitted staff, launch, or UI work.
+The 2026-10-14 release follow-up reviewed the current working tree, including uncommitted staff,
+launch, and UI changes. Earlier line references below describe the original audit state.
+
+## Release follow-up: three remaining High findings
+
+| Original finding | Current status | Direct evidence and remaining check |
+| --- | --- | --- |
+| Shared staff login and no individual revocation | **Fixed in current checkout; first-GM credential rotation unverified.** | `src/staff.ts:130-145,174-199` deletes sessions on reset/removal and rejects removed people and devices. `src/app.ts:255-310,334-383` creates per-person sessions and role checks. `tests/staff.test.ts` covers reset, removal, PIN device removal, role boundaries, attribution, and the formerly reproducible removed-GM fallback. HTTP Basic now checks active staff credentials instead of the deployment secret. The imported first GM keeps the old shared password until an operator rotates it. |
+| Blocking inbox indexes during live migration | **Fixed in current checkout; live lock timing unverified.** | Previous `src/db.ts:19-27` ran regular `CREATE INDEX` inside startup's transaction. `src/db.ts` now builds `005_inbox_indexes.sql` and the 007 outbound index with `CREATE INDEX CONCURRENTLY`, checks invalid indexes after interrupted builds, and uses a short lock timeout for other DDL. `src/boot.ts` rejects pending migrations until `npm run migrate` runs explicitly. `tests/release_audit.test.ts` covers the online index plan and startup preflight against PGlite. Validate lock and statement timeouts on a production-sized Supabase staging copy. |
+| Urgent alert with unknown Twilio acceptance | **Fixed in current checkout; real Twilio callback unverified.** | Previously `src/outbox.ts` cancelled an uncertain alert and `src/app.ts:133-140` left `/healthz` green. The release regression first reproduced that 200 response. A queue ID now travels in the signed Twilio status callback URL; `src/delivery.ts` records the accepted message and clears the cancelled queue row. `/healthz` returns 503 for unresolved staff-alert send or carrier failures. `tests/release_audit.test.ts` covers a lost API response, signed callback, and health transition. If no callback arrives, staff must inspect Twilio and contact the desk directly; no automatic resend occurs. |
+
+## New High finding in current checkout
+
+`src/db.ts:65-79` previously set `rejectUnauthorized: false` for remote Postgres unless a CA
+was supplied. A network attacker could impersonate Supabase and read or alter guest records.
+`tests/launch.test.ts` explicitly asserted the insecure setting. Remote TLS now verifies the
+certificate and refuses `sslmode=disable`; the test asserts both. The Supabase CA may need to be
+supplied as `DATABASE_CA_CERT` for the actual deployment. No live TLS handshake was performed.
 
 ## Fixed findings
 
@@ -22,7 +38,7 @@ changes through this report and do not assess later uncommitted staff, launch, o
 | Medium | `src/app.ts:140-144`, `src/inbound/classify.ts:100-130`, `src/reviews/sources.ts:53-85` | Raw provider errors could reach logs; a slow Anthropic or Google call could hold a webhook or cron pass for minutes. | Inbound logs omit raw errors; Anthropic classification has a 5-second timeout, draft generation and Google calls have 15-second timeouts. Keyword classification remains the fallback. |
 | Medium | `db/migrations/005_inbox_indexes.sql:1-16` | Inbox and `/api/status` filters had no matching partial indexes. | Added partial indexes. PGlite `EXPLAIN` with `enable_seqscan=off` used `recovery_cases_open_inbox`, `recovery_cases_unacked`, and `messages_unmatched_recent`; the full inbox OR predicate used a BitmapOr of the open and resolved indexes. Empty test tables do not establish production cardinality or latency. |
 
-## Remaining risks and decisions
+## Original remaining risks and decisions (High entries superseded by release follow-up above)
 
 | Severity | Location | Scenario and recommended fix |
 | --- | --- | --- |

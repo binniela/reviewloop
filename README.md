@@ -45,6 +45,37 @@ to `.env` to turn real services on one at a time.
 - `/operations` For the GM: whether today's reports are in, the Google sync, and any text, retry,
   escalation, follow-up or scheduled message that failed. The sidebar shows a red count when something needs a person.
 
+- `/staff` For the GM: add and remove people, reset passwords and PINs, and register front desk PCs.
+  `/audit` is the activity log: who took, texted, resolved, approved or dismissed what, and when.
+
+## Staff sign-in
+
+Everyone has their own account, with one of two roles:
+
+| | Front desk | GM |
+|---|---|---|
+| Guest issues, Upload, Check-in QR | ✓ | ✓ |
+| Review replies (approve and post), Metrics, Operations, Hotel setup, Staff, Activity log | | ✓ |
+
+- **First start:** the `ADMIN_USER` / `ADMIN_PASSWORD` login becomes the first GM, with the same
+  username and password. Anything recorded under the old shared login moves into the activity log,
+  marked "Shared login". Everyone signs in once more after upgrading (old sessions don't carry over).
+- **Adding people:** the GM fills in a name, role, 4-digit PIN and/or password on `/staff` and tells
+  them in person. People change their own on `/account` (under their name, top right). Resetting or
+  removing someone signs them out everywhere at once.
+- **Shared front desk PC:** the GM signs in on that computer and clicks "Use this computer for the
+  front desk" on `/staff`. From then on it opens on "Who's at the desk?": pick your name, type your
+  PIN. "Switch person" (top right, or the bottom of the sidebar) hands it to the next clerk. After
+  `DESK_IDLE_MINUTES` (default 15) without a click or keypress it warns for a minute, then goes back
+  to the name screen. Polling for new issues doesn't count as activity. PINs work only on registered
+  desk PCs, and 5 wrong tries lock that person's PIN for an hour (their password still works).
+- **Scripts:** HTTP Basic checks an active staff username and password, with the same role and
+  revocation rules as browser sign-in. Removing a GM also removes their Basic access. There is no
+  permanent deployment-credential login fallback.
+- Rotate the first GM's password before inviting staff if the old shared password was ever known
+  to anyone else. Changing `ADMIN_PASSWORD` alone invalidates cookies and desk PC registrations;
+  it does not change the first GM's stored password. Keep a second GM account for recovery.
+
 Public: `/checkin/:propertyId` (opt-in page), `/webhooks/twilio/sms` (Twilio, signature-checked).
 Machine: `GET /cron/tick` and `POST /api/ingest/:propertyId?kind=...` with `Authorization: Bearer $CRON_SECRET`.
 
@@ -61,7 +92,8 @@ the same console, so the desk PC and the GM's laptop see the same issues.
 | Chrome extension | Toolbar count of open issues (red when one is urgent), popup with counts and the newest issue, a notification for each new one | `extension/` (Manifest V3) |
 
 All of them read `GET /api/status` (signed-in only) for counts. Sign-in is a signed, HTTP-only
-session cookie (30 days); basic auth still works for scripts.
+session cookie backed by a sessions table (12 hours, less on a desk PC; see Staff sign-in); basic
+auth still works for scripts.
 
 **Mac and Windows builds**
 
@@ -69,18 +101,20 @@ session cookie (30 days); basic auth still works for scripts.
 cd desktop
 npm install
 node --experimental-require-module node_modules/electron/install.js   # Electron 44 on Node 20; not needed on Node 22+
-REVIEWLOOP_URL=https://your-app.vercel.app npm run dist               # dist/*.dmg (arm64, x64) and *.exe
+npm run signing:check                                                  # which signing variables are missing
+REVIEWLOOP_URL=https://your-app.vercel.app npm run dist               # signed, notarized dist/*.dmg (universal) and *.exe
 ```
 
-Without `REVIEWLOOP_URL` the app asks for the address on first launch. Builds are unsigned: macOS
-asks people to right-click > Open the first time, and Windows SmartScreen shows "More info > Run
-anyway". Sign them (Apple Developer ID, a Windows code-signing certificate) before handing them to
-hotels. Host the installers somewhere like GitHub Releases and set `DOWNLOAD_MAC_URL` and
+`npm run dist` signs and notarizes from environment variables and refuses to build unsigned unless
+`UNSIGNED=1` is set (test builds only). [desktop/SIGNING.md](desktop/SIGNING.md) lists every variable
+and where it comes from. Without `REVIEWLOOP_URL` the app asks for the address on first launch.
+Host the installers somewhere like GitHub Releases and set `DOWNLOAD_MAC_URL` and
 `DOWNLOAD_WINDOWS_URL` so `/welcome` links to them.
 
 **Chrome extension**: `npm run extension:zip`, then upload `dist/reviewloop-extension.zip` to the
 Chrome Web Store (or load `extension/` unpacked from chrome://extensions). It asks for access only
-to the one console address someone enters. Set `DOWNLOAD_CHROME_URL` to its store listing.
+to the one console address someone enters. [extension/STORE.md](extension/STORE.md) has the listing
+text and the answers the store's privacy form asks for. Set `DOWNLOAD_CHROME_URL` to its store listing.
 
 ## Deploying to Vercel
 
@@ -92,15 +126,14 @@ vercel deploy --prod
 `api/index.ts` serves the app; `public/` (icons, manifest, service worker) is served by Vercel's CDN.
 
 - **No `DATABASE_URL`: demo mode.** Two sample hotels in an in-memory database, mock Google,
-  messages printed, sign in with `demo` / `demo`. Each serverless instance has its own copy and
+  messages printed, sign in with `demo` / `demo` (GM) or
+  `maria` / `desk-demo` (front desk). Desk PINs: Maria 2468, Tom 1357, Raj 8080. Each serverless instance has its own copy and
   resets when it restarts. Good for showing the product; not for a hotel.
 - **For real:** set `DATABASE_URL` (Supabase pooler URL), `ADMIN_PASSWORD`, `CRON_SECRET`,
   `PUBLIC_URL`, `MESSAGING_MODE=live`, and the Twilio and Google credentials. Startup refuses to
   run in production without them.
 - **Scheduler:** something has to call `GET /cron/tick` with `Authorization: Bearer $CRON_SECRET`
-  every few minutes (escalations wait on it). Vercel Cron does this on Pro (add
-  `"crons": [{ "path": "/cron/tick", "schedule": "*/5 * * * *" }]` to `vercel.json`); Hobby only
-  allows daily jobs, so use Supabase `pg_cron` or any external cron there.
+  every 5 minutes (escalations wait on it). See the launch checklist below for Vercel Pro vs Hobby.
 
 Run the demo locally with `npm run dev:demo` (http://localhost:3017).
 
@@ -163,22 +196,64 @@ guess. Override any of it per property:
 
 Rows that fail to parse are listed on the upload page instead of failing the file. Last import outcomes are available in `/api/operations`.
 
-## Before going live
+## Launch checklist (live staging)
 
-- [ ] Real ASI exports from a pilot hotel, mapping confirmed
-- [ ] Where alerts go at each hotel (desk cell, GM, email, or the issues page left open) and who covers overnight
-- [ ] Front desk routine for handing out the QR code at check-in
-- [ ] Twilio A2P 10DLC registration approved (takes weeks, start now). The opt-in wording on
-      the check-in page is written for it; have it reviewed.
-- [ ] Google OAuth app + refresh token from an account managing all 4 locations. The Google
-      client follows the Business Profile v4 reviews API but **hasn't run against a live account yet.**
-- [ ] `ADMIN_PASSWORD`, `CRON_SECRET`, `PUBLIC_URL` set; `MESSAGING_MODE=live`
+Times are elapsed time, mostly waiting on someone else. Start the slow ones first.
+
+### Outside setup
+
+| Step | Hands-on | Elapsed | Notes |
+|---|---|---|---|
+| Twilio A2P 10DLC (brand + campaign) | 1 h | **2 to 4 weeks**, sometimes longer if rejected | Unregistered US long-code traffic is blocked (error 30034), so the real-phone walk waits on this. Upgrade the account from trial first. Campaign type "Customer Care" or "Mixed". Use the check-in page wording and its screenshot as the opt-in evidence. Toll-free verification is the alternative (1 to 3 weeks). |
+| Twilio number + Messaging Service with Advanced Opt-Out | 30 min | same day | Set the HELP reply to name the hotel and give the desk phone. Reviewloop does not answer HELP itself. |
+| Google Business Profile API access | 30 min | **1 to 3 weeks** | Apply with the GBP API access form from a Google Cloud project. The profile must be verified. |
+| Google OAuth client + refresh token | 30 min | same day, once access is granted | Scope `business.manage`, from an account that manages every location. **Set the OAuth consent screen to "In production"**: in "Testing", refresh tokens expire after 7 days and the sync silently stops. |
+| Anthropic API key | 10 min | same day | Set a monthly spend limit in the Console. |
+| Postgres (Supabase) | 20 min | same day | Use the pooler URL (port 6543) in `DATABASE_URL`. Set `DATABASE_CA_CERT` to Supabase's CA if the system trust store does not verify its certificate. Remote connections fail rather than bypass certificate verification. |
+| Backups | 15 min | same day | Supabase Pro ($25/mo) has daily backups (7 days); add point-in-time recovery for a hotel's live data. Free projects have none you can restore. Do one restore to a scratch project before launch. |
+| Scheduler (`/cron/tick` every 5 min) | 15 min | same day | Escalation after 20 minutes needs a tick at least every 5. **Vercel Hobby only allows daily crons** and rejects the deploy otherwise. On Pro, add `"crons": [{ "path": "/cron/tick", "schedule": "*/5 * * * *" }]` to `vercel.json`. On Hobby, use Supabase `pg_cron` + `pg_net` to call the URL with `Authorization: Bearer $CRON_SECRET`. |
+| Uptime alerts | 15 min | same day | Point Better Stack or UptimeRobot at `GET /healthz` every 5 min, alerting by SMS or call. It returns 503 when the database is unreachable, the scheduler hasn't finished a clean run in 15 minutes, or a staff alert is uncertain, rejected, or reported undelivered. |
+| Error monitoring | 30 min | same day | Runtime errors are in Vercel's logs (1 hour on Hobby). Log drains to Sentry or Better Stack need Vercel Pro. Scheduler and send failures also show on `/operations`. |
+| Vercel deployment protection | 10 min | same day | Previews sit behind Vercel Authentication. Either serve staging from a domain without protection, or enable "Protection Bypass for Automation" and give Twilio webhook URLs ending in `?x-vercel-protection-bypass=<secret>`. Signatures cover the query string, and delivery callbacks pick the secret up from `VERCEL_AUTOMATION_BYPASS_SECRET`. |
+
+### Deploy
+
+- [ ] `vercel link`, then set env vars (Production, or the staging environment): `DATABASE_URL`, `DATABASE_CA_CERT`, `ADMIN_PASSWORD`, `CRON_SECRET` (`openssl rand -hex 32`), `PUBLIC_URL` (the exact https URL Twilio will call), `MESSAGING_MODE=live`, `TWILIO_ACCOUNT_SID`, `TWILIO_AUTH_TOKEN`, `TWILIO_MESSAGING_SERVICE_SID`, `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET`, `GOOGLE_REFRESH_TOKEN`, `ANTHROPIC_API_KEY`. Startup refuses to run in live mode with any of them missing.
+- [ ] Before deploying, run `npm run migrate` once against the target database using a direct or session-pooler `DATABASE_URL` (not the transaction pooler on port 6543). The inbox and outbound indexes build concurrently. Then restore the app's transaction-pooler URL and deploy. Requests reject pending migrations rather than building indexes while guests use the app.
+- [ ] `vercel deploy --prod` (or to the staging alias).
+- [ ] Load the hotel: `npm run properties -- config/properties.json` against the staging database, with `sms_from`, `desk_phones`, `gm_phone`, `google_place_id` and `google_location` filled in.
+- [ ] In Twilio, set the number's "A message comes in" webhook to `{PUBLIC_URL}/webhooks/twilio/sms` (HTTP POST).
+- [ ] Start the scheduler and the uptime monitor.
+- [ ] `PUBLIC_URL=... CRON_SECRET=... TWILIO_AUTH_TOKEN=... npm run staging:check`. Every line must say PASS. It checks the database, scheduler heartbeat, cron auth, that unsigned and forged webhooks get 403, and that a correctly signed callback is accepted.
+
+### Walk one stay with a real phone
+
+Use a test guest whose stay is 2+ nights, and a desk phone and GM phone you can hold. Keep `/operations` open.
+
+- [ ] Upload an in-house CSV with the test guest, `SMS Opt In` = N.
+- [ ] Scan the QR sign from `/setup`, sign up, confirm the sign-up on Guest issues. **Welcome text arrives** (it doubles as the opt-in confirmation).
+- [ ] Mid-stay text: arrives the next morning at 10 AM hotel time (or move the `mid_stay` job's `run_at` to now and tick).
+- [ ] Text "The AC is broken". **Acknowledgement to the guest, alert to the desk phone.**
+- [ ] Don't touch it. **GM text about 20 minutes later** (next tick after 20).
+- [ ] Resolve it on Guest issues. **"Is everything better now?" about 30 minutes later.** Reply "no": issue reopens, GM alerted. Resolve again, reply "yes".
+- [ ] Upload a departures CSV with the guest checked out. **Review request 2 hours later** (held while an issue is open).
+- [ ] Leave a Google review from a separate account. Next tick: **it appears on `/` with Claude's draft**. Edit, approve. **Reply shows on Google.**
+- [ ] Text STOP: Twilio confirms, nothing else is sent (`opt_outs` has the number). Text START. Text HELP: Twilio's HELP reply only; the desk sees a normal-urgency request, the GM is not paged.
+- [ ] Failed delivery: text a landline or an unreachable number from Guest issues. **It shows under "Texts that didn't deliver"** on `/operations`.
+- [ ] Simulate a staff-alert timeout after Twilio accepted the SMS: `/healthz` turns 503 until Twilio's signed status callback identifies the queued alert. If no callback comes, inspect the message in Twilio by time, sender, recipient and body, contact the desk directly, and keep the alert flagged; do not resend an uncertain alert blindly.
+- [ ] Error in a scheduled job: temporarily set `GOOGLE_REFRESH_TOKEN` to a wrong value and redeploy. **`/operations` shows the Google sync error** and `/cron/tick` returns 500. Put it back.
+- [ ] Late or doubled cron: pause the scheduler for 30 minutes. **`/operations` says the scheduler hasn't run, `/healthz` returns 503, the uptime monitor alerts.** Resume it; missed escalations go out once. Hit `/cron/tick` twice at the same moment: one run does the work, the other returns `"skipped"`.
+
+### What the code guarantees (tested in `tests/launch.test.ts`)
+
+- Unsigned, forged, or wrong-URL Twilio webhooks get 403 in every mode except explicit local development.
+- A permanent provider rejection (bad number, landline, unsubscribed) is not retried and shows on `/operations`. Twilio error 21610 is recorded as an opt-out. Temporary failures retry with backoff, up to 8 tries (about four hours), then show as not sent.
+- Each scheduler step runs even if another fails. Failures are recorded and counted in the sidebar badge. Overlapping ticks run once. Review drafting stops after 40 s and resumes on the next tick, inside the 60 s function limit.
 
 ## Not built yet
 
 - Phase 3: Booking.com, Expedia, Tripadvisor (draft plus deep link), low-rating alerts
 - Real ASI integration if the partner program comes through (swap the CSV adapter; everything downstream stays the same)
-- Individual staff logins (one shared login for now; the name typed into actions is not verified)
 - Pre-arrival message (hotels rarely need one; easy to add as another milestone)
 
 ## Code map
