@@ -65,12 +65,29 @@ export async function syncReviews(db: Db, propertyId: string, deps: SyncDeps): P
     if (row!.inserted) summary.newReviews++;
   }
 
+  // A worker can die after Google accepts a reply but before the local status changes.
+  // Reconcile that state from Google's observed reply; otherwise put the draft back where
+  // staff can inspect the external listing before choosing to retry.
+  await db.query(
+    `update reply_drafts d set status = 'posted', posted_at = coalesce(posted_at, $2), error = null
+       from reviews r where d.review_id = r.id and r.property_id = $1 and d.status = 'approved'
+         and r.existing_reply = coalesce(d.final_text, d.draft)`,
+    [property.id, now.toISO()],
+  );
+  await db.query(
+    `update reply_drafts d set status = 'failed', error = 'Posting outcome unknown. Check Google before retrying.'
+       from reviews r where d.review_id = r.id and r.property_id = $1 and d.status = 'approved'
+         and d.decided_at < $2::timestamptz - interval '15 minutes'
+         and r.existing_reply is null`,
+    [property.id, now.toISO()],
+  );
+
   // Someone replied directly on the platform: retire our draft so it's never posted on top.
   await db.query(
     `update reply_drafts d set status = 'dismissed', decided_by = 'replied outside app', decided_at = now()
        from reviews r
       where r.id = d.review_id and r.property_id = $1 and r.existing_reply is not null
-        and d.status in ('pending', 'failed')`,
+        and d.status in ('pending', 'failed', 'approved')`,
     [property.id],
   );
 

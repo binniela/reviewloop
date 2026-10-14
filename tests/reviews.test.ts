@@ -50,6 +50,19 @@ describe("decide", () => {
 });
 
 describe("syncReviews", () => {
+  it("reconciles interrupted approved posts and surfaces unknown outcomes", async () => {
+    const db = await testDb();
+    const source = new MockReviewSource({ sunset: [review("sent", 3, "Fine"), review("unknown", 3, "Okay")] });
+    await syncReviews(db, "sunset", { source, drafter: new RecordingDrafter(), now: NOW });
+    await db.query("update reply_drafts set status = 'approved', decided_at = $1", ["2026-10-15T17:00:00Z"]);
+    source.reviews.sunset![0]!.existingReply = "Reply to Guest";
+    await syncReviews(db, "sunset", { source, drafter: new RecordingDrafter(), now: NOW });
+    const rows = await db.query<{ external_id: string; status: string; error: string | null }>(
+      "select r.external_id, d.status, d.error from reply_drafts d join reviews r on r.id = d.review_id order by r.external_id");
+    expect(rows.map(r => [r.external_id.split("/").pop(), r.status])).toEqual([["sent", "posted"], ["unknown", "failed"]]);
+    expect(rows[1]!.error).toContain("Check Google");
+    await db.close();
+  });
   it("drafts new reviews, auto-posts high ratings, queues the rest, and is idempotent", async () => {
     const db = await testDb();
     await db.query("update properties set reply_mode = 'auto_high'");
