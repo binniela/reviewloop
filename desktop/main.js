@@ -34,6 +34,8 @@ app.on("second-instance", () => {
   win.focus();
 });
 if (process.platform === "win32") app.setAppUserModelId("com.reviewloop.desktop");
+// The brand is light only; keep pages and native controls light even when the OS is in dark mode.
+nativeTheme.themeSource = "light";
 
 function openConsole(path = "/issues") {
   const origin = serverOrigin();
@@ -50,7 +52,7 @@ function createWindow() {
     minHeight: 560,
     title: "Reviewloop",
     show: false,
-    backgroundColor: nativeTheme.shouldUseDarkColors ? "#171512" : "#FBFAF7",
+    backgroundColor: "#FFFFFF",
     titleBarStyle: mac ? "hiddenInset" : "default",
     trafficLightPosition: { x: 16, y: 14 },
     autoHideMenuBar: !mac,

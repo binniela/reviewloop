@@ -1,4 +1,4 @@
-import { readdir, readFile } from "node:fs/promises";
+import { mkdir, readdir, readFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -95,5 +95,8 @@ export async function openPostgres(connectionString: string): Promise<Db> {
 export async function openFromEnv(): Promise<Db> {
   const url = process.env.DATABASE_URL;
   if (url) return openPostgres(url);
-  return openPglite(process.env.PGLITE_DIR ?? ".data/pglite");
+  const dir = process.env.PGLITE_DIR ?? ".data/pglite";
+  // PGlite creates the data directory but not its parents (.data/ on a fresh clone).
+  await mkdir(dirname(dir), { recursive: true });
+  return openPglite(dir);
 }

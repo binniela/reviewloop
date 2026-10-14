@@ -182,3 +182,38 @@ describe("operations, report freshness and undo", () => {
     expect(after!.status).toBe("pending");
   });
 });
+
+describe("inbox filters and Ask Reviewloop", () => {
+  const NOW = new Date("2026-10-14T19:00:00Z");
+  async function demoApp() {
+    const db = await openPglite();
+    await migrate(db);
+    const source = await seedDemo(db, NOW);
+    return createApp({ db, source, messenger: new ConsoleMessenger(true), drafter: new TemplateDrafter(), now: () => NOW });
+  }
+
+  it("searches, filters by hotel and view, and shows fixed issues under Follow up", async () => {
+    const app = await demoApp();
+    // Names in list rows (the Log an issue dropdown lists every guest, so match row markup).
+    const rows = async (path: string) => [...(await (await app.request(path)).text()).matchAll(/<strong>([^<]+)<\/strong><span class="row-room">/g)].map((m) => m[1]);
+    expect(await rows("/issues?q=toilet")).toEqual(["Ana Gomez"]);
+    const harbor = await rows("/issues?hotel=harbor");
+    expect(harbor).toContain("Dev Singh");
+    expect(harbor).not.toContain("Ana Gomez");
+    expect(await rows("/issues?view=urgent")).toEqual(["Ana Gomez"]);
+    // Anita's AC issue was fixed and she said it's better, so it's Done, not Follow up.
+    expect(await rows("/issues?tab=done")).toContain("Anita Patel");
+    expect(await rows("/issues?tab=followup")).not.toContain("Anita Patel");
+  });
+
+  it("answers from live data and matches free-text questions to a topic", async () => {
+    const app = await demoApp();
+    const complaints = (await (await app.request("/api/ask?topic=complaints")).json()) as { bars: { label: string; value: number }[] };
+    expect(complaints.bars[0]).toMatchObject({ label: "Maintenance" });
+    const risk = (await (await app.request("/api/ask?q=what%20is%20about%20to%20escalate")).json()) as { title: string; items: { text: string }[] };
+    expect(risk.title).toContain("nobody on it");
+    expect(risk.items.some((i) => i.text.includes("GM already texted"))).toBe(true);
+    const unknown = (await (await app.request("/api/ask?q=weather")).json()) as { followups: unknown[] };
+    expect(unknown.followups).toHaveLength(3);
+  });
+});

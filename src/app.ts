@@ -26,6 +26,7 @@ import { icon, layout, stars, statBox, type Flash } from "./web/layout.js";
 import { loginPage } from "./web/login.js";
 import { metricsPage } from "./web/metrics.js";
 import { operationsPage, problemCounts, reportFreshness } from "./web/operations.js";
+import { answer, topicFor, type Topic } from "./web/ask.js";
 import { checkinDone, checkinForm, qrSign } from "./web/public.js";
 
 export interface AppDeps {
@@ -364,8 +365,25 @@ export function createApp(deps: AppDeps) {
   });
 
   app.get("/issues", async (c) =>
-    c.html(await issuesPage(db, now(), { selected: c.req.query("id"), flash: flashFrom(c.req.query("ok")) })),
+    c.html(
+      await issuesPage(db, now(), {
+        selected: c.req.query("id"),
+        flash: flashFrom(c.req.query("ok")),
+        tab: c.req.query("tab"),
+        view: c.req.query("view"),
+        hotel: c.req.query("hotel"),
+        q: c.req.query("q"),
+        sort: c.req.query("sort"),
+      }),
+    ),
   );
+
+  // Ask Reviewloop: answers computed from live data (see web/ask.ts).
+  app.get("/api/ask", async (c) => {
+    const t = c.req.query("topic");
+    const topic: Topic | null = t === "complaints" || t === "risk" || t === "reviews" ? t : topicFor(c.req.query("q") ?? "");
+    return c.json(await answer(db, now(), topic));
+  });
 
   app.post("/issues", async (c) => {
     const form = await c.req.parseBody();
