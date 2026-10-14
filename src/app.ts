@@ -2,7 +2,7 @@ import { caseHistory, conversationHistory, unmatchedMessages } from "./inbox.js"
 import { recordDelivery } from "./delivery.js";
 import { pilotFunnel } from "./operations.js";
 import { dispatchOutbox } from "./outbox.js";
-import { createHash, timingSafeEqual } from "node:crypto";
+import { createHash, createHmac, timingSafeEqual } from "node:crypto";
 import { Hono, type Context } from "hono";
 import { deleteCookie, getSignedCookie, setSignedCookie } from "hono/cookie";
 import { html } from "hono/html";
@@ -28,6 +28,7 @@ import { metricsPage } from "./web/metrics.js";
 import { operationsPage, problemCounts, reportFreshness } from "./web/operations.js";
 import { answer, topicFor, type Topic } from "./web/ask.js";
 import { checkinDone, checkinForm, qrSign } from "./web/public.js";
+import { rateLimited, sameOrigin } from "./security.js";
 
 export interface AppDeps {
   db: Db;
@@ -66,6 +67,37 @@ export function createApp(deps: AppDeps) {
   const app = new Hono<Env>();
   const now = () => deps.now?.() ?? new Date();
   const classifier = deps.classifier ?? classifierFromEnv();
+  const adminUser = deps.adminUser ?? "admin";
+  const sessionKey = `reviewloop-session:${adminUser}:${deps.adminPassword ?? ""}`;
+  const SESSION = "rl_session";
+  const SESSION_HOURS = 12;
+  const csrfToken = (session: string) => createHmac("sha256", sessionKey).update(`csrf:${session}`).digest("hex");
+
+  // Forms rendered for a signed session carry a token bound to that session. Basic-auth API
+  // clients remain usable without a token; browser Basic requests still need a same-origin header.
+  app.use("/*", async (c, next) => {
+    const path = new URL(c.req.url).pathname;
+    const publicPost = path === "/login" || path.startsWith("/checkin/");
+    const exempt = path.startsWith("/webhooks/twilio/") || path.startsWith("/api/ingest/");
+    const session = deps.adminPassword ? await getSignedCookie(c, sessionKey, SESSION) : undefined;
+    if (c.req.method === "POST" && !exempt && deps.adminPassword) {
+      const origin = c.req.header("origin"), referer = c.req.header("referer");
+      const browser = !!origin || !!referer || !!session || publicPost;
+      if (browser && !sameOrigin(c.req.url, origin, referer, deps.publicUrl)) return c.text("invalid origin", 403);
+      if (session && !publicPost) {
+        const body = await c.req.parseBody();
+        if (body._csrf !== csrfToken(session)) return c.text("invalid CSRF token", 403);
+      }
+    }
+    await next();
+    if (session && c.res.headers.get("content-type")?.includes("text/html")) {
+      const body = await c.res.text();
+      const token = csrfToken(session);
+      c.res = new Response(body.replace(/<form\b([^>]*\bmethod="post"[^>]*)>/gi,
+        (_full, attrs: string) => `<form${attrs}><input type="hidden" name="_csrf" value="${token}">`),
+      { status: c.res.status, headers: c.res.headers });
+    }
+  });
 
   // ---------- Machine endpoints (bearer token; Vercel Cron sends "Authorization: Bearer $CRON_SECRET")
   const requireSecret = async (c: Context<Env>, next: () => Promise<void>) => {
@@ -121,14 +153,6 @@ export function createApp(deps: AppDeps) {
   });
 
   // ---------- Guest check-in opt-in (public, rate limited)
-  const attempts = new Map<string, number[]>();
-  const limited = (key: string) => {
-    const t = Date.now();
-    const recent = (attempts.get(key) ?? []).filter((x) => t - x < 3_600_000);
-    recent.push(t);
-    attempts.set(key, recent);
-    return recent.length > 10;
-  };
 
   app.get("/checkin/:propertyId", async (c) => {
     const p = await getProperty(db, c.req.param("propertyId")).catch(() => null);
@@ -138,10 +162,10 @@ export function createApp(deps: AppDeps) {
   app.post("/checkin/:propertyId", async (c) => {
     const p = await getProperty(db, c.req.param("propertyId")).catch(() => null);
     if (!p) return c.notFound();
-    const ip = c.req.header("x-forwarded-for")?.split(",")[0]?.trim() ?? "local";
-    if (limited(`${p.id}:${ip}`)) return c.html(checkinForm(p, "Too many attempts. Please ask the front desk."), 429);
     const form = await c.req.parseBody();
     const values = { last_name: String(form.last_name ?? ""), room: String(form.room ?? ""), phone: String(form.phone ?? "") };
+    if (await rateLimited(db, "checkin", `${p.id}:${values.last_name.toLowerCase()}:${values.room.toLowerCase()}`, 10, now()))
+      return c.html(checkinForm(p, "Too many attempts. Please ask the front desk."), 429);
     const res = await recordConsent(db, deps.messenger, {
       propertyId: p.id,
       lastName: values.last_name,
@@ -158,10 +182,6 @@ export function createApp(deps: AppDeps) {
 
   // ---------- Staff sign-in. A signed session cookie for browsers, the installed web app and the
   // desktop app; HTTP basic auth still works for scripts. The username is recorded on approvals and issues.
-  const adminUser = deps.adminUser ?? "admin";
-  const sessionKey = `reviewloop-session:${adminUser}:${deps.adminPassword ?? ""}`;
-  const SESSION = "rl_session";
-  const SESSION_DAYS = 30;
   const same = (a: string, b: string) => timingSafeEqual(createHash("sha256").update(a).digest(), createHash("sha256").update(b).digest());
   const validLogin = (user: string, password: string) => same(user, adminUser) && same(password, deps.adminPassword ?? "");
   const safeNext = (next: unknown) => (typeof next === "string" && next.startsWith("/") && !next.startsWith("//") ? next : "/issues");
@@ -172,15 +192,17 @@ export function createApp(deps: AppDeps) {
     const form = await c.req.parseBody();
     const next = safeNext(form.next);
     const user = String(form.user ?? "").trim();
+    if (await rateLimited(db, "login", user.toLowerCase(), 10, now()))
+      return c.html(loginPage({ next, user, error: "Too many attempts. Try again later." }), 429);
     if (!deps.adminPassword || !validLogin(user, String(form.password ?? ""))) {
       return c.html(loginPage({ next, user, error: "That username and password don't match." }), 401);
     }
-    await setSignedCookie(c, SESSION, `${user}|${Date.now() + SESSION_DAYS * 86_400_000}`, sessionKey, {
+    await setSignedCookie(c, SESSION, `${user}|${Date.now() + SESSION_HOURS * 3_600_000}`, sessionKey, {
       httpOnly: true,
       sameSite: "Lax",
-      secure: new URL(c.req.url).protocol === "https:",
+      secure: new URL(deps.publicUrl ?? c.req.url).protocol === "https:",
       path: "/",
-      maxAge: SESSION_DAYS * 86_400,
+      maxAge: SESSION_HOURS * 3_600,
     });
     return c.redirect(next);
   });
@@ -286,7 +308,8 @@ export function createApp(deps: AppDeps) {
     sync: await db.query("select * from sync_state order by key"),
   }));
 
-  app.get("/", async (c) => {
+  // Review replies. After a failed post the page comes back with what they wrote and why.
+  const repliesPage = async (c: Context<Env>, failed?: { id: string; text: string; error: string }) => {
     const queue = await db.query<QueueRow>(
       `select d.id::text, d.draft, d.status, d.error, r.author, r.rating, r.body, r.reviewed_at, r.source,
               p.name as property, case when r.stay_verified_at is not null then s.confirmation end as confirmation
@@ -322,10 +345,11 @@ export function createApp(deps: AppDeps) {
                 </header>
                 <blockquote>${q.body ?? "(rating only)"}</blockquote>
                 <form method="post" action="/drafts/${q.id}/approve">
-                  <label>Reply draft <span class="muted small">· edit anything before posting</span><textarea name="text" rows="5">${q.draft}</textarea></label>
+                  ${failed?.id === q.id ? html`<p class="err small" role="alert">${failed.error}</p>` : ""}
+                  <label>Reply draft <span class="muted small">· edit anything before posting</span><textarea name="text" rows="5" required>${failed?.id === q.id ? failed.text : q.draft}</textarea></label>
                   <div class="actions">
-                    <button type="submit">${q.status === "failed" ? "Try posting again" : "Approve and post"}</button>
-                    <button type="submit" class="secondary" formaction="/drafts/${q.id}/dismiss">Dismiss</button>
+                    <button type="submit" data-busy-text="Posting…">${q.status === "failed" ? "Try posting again" : "Approve and post"}</button>
+                    <button type="submit" class="secondary" formaction="/drafts/${q.id}/dismiss" formnovalidate>Dismiss</button>
                   </div>
                 </form>
               </article>
@@ -334,18 +358,30 @@ export function createApp(deps: AppDeps) {
         `,
         {
           active: "/",
-          flash: c.req.query("undo") ? undefined : flashFrom(c.req.query("ok")),
+          flash: failed && !queue.some((q) => q.id === failed.id)
+            ? { text: failed.error, tone: "err" }
+            : c.req.query("undo") ? undefined : flashFrom(c.req.query("ok")),
           undo: c.req.query("undo") ? { text: "Draft dismissed. Nothing was posted.", action: `/drafts/${encodeURIComponent(c.req.query("undo")!)}/restore` } : undefined,
           lede: "Claude drafts a reply to every new review. Replies wait here for approval, unless a hotel is set to post 4 and 5 stars on its own. Sensitive topics always wait.",
         },
       ),
+      failed ? 400 : 200,
     );
-  });
+  };
+  app.get("/", (c) => repliesPage(c));
 
   app.post("/drafts/:id/approve", async (c) => {
     const form = await c.req.parseBody();
-    const res = await approveDraft(db, deps.source, c.req.param("id"), String(form.text ?? ""), c.get("user"));
-    if (!res.ok) return c.html(layout("Not posted", html`<p class="err">${res.error}</p><a class="btn secondary" href="/">Back to replies</a>`, { active: "/" }), 502);
+    const id = c.req.param("id");
+    const text = String(form.text ?? "");
+    const res = await approveDraft(db, deps.source, id, text, c.get("user")).catch((err: Error) => ({ ok: false as const, error: err.message }));
+    if (!res.ok) {
+      const error =
+        res.error === "reply text is empty" ? "Write a reply before posting."
+        : res.error === "draft is not awaiting approval" ? "This reply was already posted or dismissed, maybe from another screen."
+        : `Not posted: ${res.error}. Your text is still here; try again.`;
+      return repliesPage(c, { id, text, error });
+    }
     return c.redirect("/?ok=posted");
   });
 
@@ -499,7 +535,7 @@ export function createApp(deps: AppDeps) {
               <span class="drop-cta">${icon("upload")} Choose the CSV file</span>
               <span class="drop-name muted small">Exported from ASI. Uploading the same file twice is safe.</span>
             </label>
-            <button type="submit" class="wide">Import report</button>
+            <button type="submit" class="wide" data-busy-text="Importing…">Import report</button>
           </form>
         `,
         { active: "/upload", lede: "Upload today’s in-house and departures reports each morning. Welcome texts and review requests are timed from them." },
@@ -521,6 +557,10 @@ export function createApp(deps: AppDeps) {
             ${statBox("New stays", String(r.created))} ${statBox("Updated", String(r.updated))}
             ${statBox("Unchanged", String(r.unchanged))} ${statBox("Rows with problems", String(r.rowErrors.length))}
           </div>
+          ${r.rows === 0 && !r.rowErrors.length
+            ? html`<p class="banner warn" role="alert">${icon("alert")}<strong>No guests found in this file.</strong>
+                <span>If this report should list guests, check it’s the ${REPORT_LABEL[kind].name} report exported from ASI as CSV, then upload it again.</span></p>`
+            : ""}
           ${r.consentsLinked ? html`<p>Linked ${r.consentsLinked} check-in text sign-ups to guests.</p>` : ""}
           ${r.rowErrors.length
             ? html`<h2>Rows with problems</h2>
