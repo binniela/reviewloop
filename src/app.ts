@@ -184,7 +184,12 @@ export function createApp(deps: AppDeps) {
   // desktop app; HTTP basic auth still works for scripts. The username is recorded on approvals and issues.
   const same = (a: string, b: string) => timingSafeEqual(createHash("sha256").update(a).digest(), createHash("sha256").update(b).digest());
   const validLogin = (user: string, password: string) => same(user, adminUser) && same(password, deps.adminPassword ?? "");
-  const safeNext = (next: unknown) => (typeof next === "string" && next.startsWith("/") && !next.startsWith("//") ? next : "/issues");
+  const safeNext = (next: unknown) => {
+    if (typeof next !== "string" || !next.startsWith("/") || /[\\\u0000-\u001f]/.test(next)) return "/issues";
+    try {
+      return new URL(next, "https://reviewloop.invalid").origin === "https://reviewloop.invalid" ? next : "/issues";
+    } catch { return "/issues"; }
+  };
 
   app.get("/login", (c) => (deps.adminPassword ? c.html(loginPage({ next: safeNext(c.req.query("next")) })) : c.redirect("/issues")));
 

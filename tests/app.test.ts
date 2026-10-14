@@ -94,6 +94,13 @@ describe("http app", () => {
     expect((await second.request("/login", request())).status).toBe(429);
   });
 
+  it("does not redirect sign-in to a backslash external host", async () => {
+    const { app } = await setup({ adminUser: "raj", adminPassword: "pw" });
+    const res = await app.request("/login", { method: "POST", headers: { Origin: "http://localhost" },
+      body: new URLSearchParams({ user: "raj", password: "pw", next: "/\\evil.example" }) });
+    expect(res.headers.get("location")).toBe("/issues");
+  });
+
   it("uploads a CSV through the form and logs and resolves a guest issue", async () => {
     const { app, db } = await setup();
     const form = new FormData();
