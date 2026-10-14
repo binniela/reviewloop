@@ -112,4 +112,18 @@ describe("reconcile", () => {
     const [stay] = await db.query<{ status: string }>("select status from stays");
     expect(stay!.status).toBe("checked_out");
   });
+
+  it("serializes overlapping reports and keeps checkout as the final state", async () => {
+    const db = await testDb();
+    const row = (status: string) => parseAsiReport(
+      `Confirmation,Guest Name,Arrival,Departure,Status\n88,Kim Tran,10/12/2026,10/14/2026,${status}\n`,
+      { kind: status === "In House" ? "in_house" : "departures", timezone: tz },
+    ).reservations;
+    await Promise.all([
+      reconcile(db, "sunset", row("In House"), now),
+      reconcile(db, "sunset", row("Checked Out"), now),
+    ]);
+    expect((await db.query<{ status: string }>("select status from stays where confirmation = '88'"))[0]?.status).toBe("checked_out");
+    expect(await db.query("select id from events where type = 'guest.checked_out' and stay_id = (select id from stays where confirmation = '88')")).toHaveLength(1);
+  });
 });

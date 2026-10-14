@@ -68,6 +68,15 @@ export async function reconcile(
   snapshots: ReservationSnapshot[],
   now: Date = new Date(),
 ): Promise<ReconcileResult> {
+  // Serialize imports for this hotel, including the read-before-upsert and event creation.
+  // Without the lock, two workers can base status transitions on stale snapshots.
+  return db.transaction(async (tx) => {
+    await tx.query("select id from properties where id = $1 for update", [propertyId]);
+    return reconcileRows(tx, propertyId, snapshots, now);
+  });
+}
+
+async function reconcileRows(db: Db, propertyId: string, snapshots: ReservationSnapshot[], now: Date): Promise<ReconcileResult> {
   const result: ReconcileResult = { created: 0, updated: 0, unchanged: 0, ignoredRegressions: 0, events: 0 };
 
   for (const incoming of snapshots) {
