@@ -14,6 +14,19 @@ export async function rateLimited(db: Db, scope: string, value: string, limit: n
   return row!.attempts > limit;
 }
 
+/** Failures counted so far this window, without adding one. Used where only wrong guesses should count (PINs). */
+export async function attemptsSoFar(db: Db, scope: string, value: string, now = new Date()): Promise<number> {
+  const key = createHash("sha256").update(`${scope}:${value}`).digest("hex");
+  const [row] = await db.query<{ attempts: number }>(
+    "select attempts from request_limits where key = $1 and window_start > $2::timestamptz - interval '1 hour'", [key, now.toISOString()],
+  );
+  return row?.attempts ?? 0;
+}
+
+export async function clearLimit(db: Db, scope: string, value: string): Promise<void> {
+  await db.query("delete from request_limits where key = $1", [createHash("sha256").update(`${scope}:${value}`).digest("hex")]);
+}
+
 /** Browser writes must originate at our public origin; API clients using Basic auth have no Origin. */
 export function sameOrigin(requestUrl: string, origin: string | undefined, referer: string | undefined, publicUrl?: string): boolean {
   const expected = new URL(publicUrl ?? requestUrl).origin;

@@ -17,7 +17,7 @@ export function loginPage(opts: { next: string; user?: string; error?: string })
           <h1>Welcome back.</h1>
           <p class="muted">Sign in to the front desk console.</p>
           ${opts.error ? html`<p class="err" role="alert">${opts.error}</p>` : ""}
-          ${isDemo() ? html`<p class="hint">Demo: username <b>demo</b>, password <b>demo</b></p>` : ""}
+          ${isDemo() ? html`<p class="hint">Demo GM: username <b>demo</b>, password <b>demo</b>. Front desk: <b>maria</b> / <b>desk-demo</b></p>` : ""}
           <form method="post" action="/login">
             <input type="hidden" name="next" value="${opts.next}" />
             <label>Username <input name="user" autocomplete="username" required value="${opts.user ?? ""}" autofocus /></label>
@@ -29,7 +29,7 @@ export function loginPage(opts: { next: string; user?: string; error?: string })
     </html>`;
 }
 
-const LOGIN_CSS = `
+export const LOGIN_CSS = `
 body.login { min-height:100vh; display:grid; place-items:center; padding:24px 16px; position:relative; overflow:hidden; }
 .sky { position:fixed; inset:-10%; z-index:0; filter:blur(48px) saturate(1.05); opacity:.9;
   background:

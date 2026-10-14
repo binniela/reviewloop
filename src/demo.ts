@@ -7,6 +7,7 @@ import { handleInbound } from "./inbound/handle.js";
 import { ConsoleMessenger } from "./messaging.js";
 import { TemplateDrafter } from "./reviews/drafter.js";
 import { MockReviewSource } from "./reviews/sources.js";
+import { createStaff } from "./staff.js";
 
 /**
  * Fills an empty database with two hotels and a believable last few days, timed relative to
@@ -29,6 +30,11 @@ export async function seedDemo(db: Db, now = new Date()) {
              'Small boutique hotel by the marina. Friendly, a little polished.', 'Dana, General Manager',
              '+13105550000', '{+13105559001}', '+13105559002')`,
   );
+
+  // Sign in as the GM with demo / demo. Desk staff switch in by PIN once a GM sets up a desk PC on Staff.
+  await createStaff(db, { username: "demo", name: "Raj", role: "gm", password: "demo", pin: "8080", by: "demo" }, now);
+  await createStaff(db, { username: "maria", name: "Maria", role: "desk", password: "desk-demo", pin: "2468", by: "demo" }, now);
+  await createStaff(db, { username: "tom", name: "Tom", role: "desk", pin: "1357", by: "demo" }, now);
 
   let clock = now;
   const messenger = new ConsoleMessenger(true);
