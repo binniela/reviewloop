@@ -89,6 +89,7 @@ export async function sendReviewRequest(db: Db, stayId: string, messenger: Messe
     subject: channel === "email" ? `How was your stay at ${property.name}?` : undefined,
     stayId,
     at: now.toJSDate(),
+    dedupeKey: `review_request:${stayId}`,
   });
 
   await db.query(

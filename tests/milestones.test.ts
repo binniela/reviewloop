@@ -4,6 +4,7 @@ import { parseAsiReport } from "../src/ingest/asiReport.js";
 import { reconcile } from "../src/ingest/reconcile.js";
 import { ConsoleMessenger } from "../src/messaging.js";
 import { processEvents, runDueJobs } from "../src/milestones/engine.js";
+import { sendReviewRequest } from "../src/reviews/requests.js";
 import { DEPARTURES_CSV, testDb } from "./helpers.js";
 
 const tz = "America/Los_Angeles";
@@ -23,6 +24,18 @@ async function job(db: Db, confirmation: string, kind = "review_request") {
 }
 
 describe("review request milestone", () => {
+  it("reuses the logged provider send if request bookkeeping must be retried", async () => {
+    const db = await testDb();
+    await ingest(db, DEPARTURES_CSV, "departures", "2026-10-13T19:00:00Z");
+    const [stay] = await db.query<{ id: string }>("select id::text from stays where confirmation = '10001'");
+    const messenger = new ConsoleMessenger(true);
+    const now = new Date("2026-10-13T20:30:00Z");
+    expect((await sendReviewRequest(db, stay!.id, messenger, now)).status).toBe("done");
+    await db.query("delete from review_requests where stay_id = $1", [stay!.id]);
+    expect((await sendReviewRequest(db, stay!.id, messenger, now)).status).toBe("done");
+    expect(messenger.sent).toHaveLength(1);
+    await db.close();
+  });
   it("schedules 2 hours after actual checkout, uses SMS only with consent, falls back to email", async () => {
     const db = await testDb();
     await ingest(db, DEPARTURES_CSV, "departures", "2026-10-13T19:00:00Z");

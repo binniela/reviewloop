@@ -52,7 +52,7 @@ export async function sendWelcome(db: Db, stayId: string, messenger: Messenger, 
   if (quiet) return { status: "deferred", runAt: quiet.toJSDate(), result: "quiet hours" };
 
   const body = `${renderTemplate(property.welcome_template, guestVars(property, contact))}\nReply STOP to opt out.`;
-  await sendAndLog(db, messenger, { property, kind: "welcome", channel: "sms", to: perm.phone, body, stayId, at: nowDate });
+  await sendAndLog(db, messenger, { property, kind: "welcome", channel: "sms", to: perm.phone, body, stayId, at: nowDate, dedupeKey: `welcome:${stayId}` });
   return { status: "done", result: "sent welcome" };
 }
 
@@ -75,6 +75,6 @@ export async function sendMidStay(db: Db, stayId: string, messenger: Messenger, 
   if (quiet) return { status: "deferred", runAt: quiet.toJSDate(), result: "quiet hours" };
 
   const body = renderTemplate(property.midstay_template, guestVars(property, contact));
-  await sendAndLog(db, messenger, { property, kind: "mid_stay", channel: "sms", to: perm.phone, body, stayId, at: nowDate });
+  await sendAndLog(db, messenger, { property, kind: "mid_stay", channel: "sms", to: perm.phone, body, stayId, at: nowDate, dedupeKey: `mid_stay:${stayId}` });
   return { status: "done", result: "sent mid-stay check" };
 }
