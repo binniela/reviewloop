@@ -3,6 +3,8 @@
 Reviewed 2026-10-14. Scope: `src/app.ts`, boot and DB code, outbound delivery and consent,
 inbound handling, milestones, reviews, inbox queries, migrations, and the README. Findings
 below describe code behavior; this is not a legal certification of an SMS program.
+The checkout was being edited concurrently during this review. Findings refer to the committed
+changes through this report and do not assess later uncommitted staff, launch, or UI work.
 
 ## Fixed findings
 
