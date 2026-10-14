@@ -33,22 +33,57 @@ export async function reportFreshness(db: Db, now: Date): Promise<Freshness[]> {
   });
 }
 
+/** Cron runs every 5 minutes; three missed runs means it has stopped. */
+export const SCHEDULER_STALE_MINUTES = 15;
+
+/** Alert delivery failures must reach the external uptime monitor, even when cron is healthy. */
+export async function alertHealth(db: Db): Promise<number> {
+  const [row] = await db.query<{ n: number }>(`select (
+    (select count(*) from outbound_queue where status in ('failed', 'cancelled')
+       and payload->>'kind' = 'alert' and last_error is not null)
+    + (select count(*) from sms_delivery_receipts r join messages m on m.provider_id = r.provider_id
+       where m.kind = 'alert' and r.status in ('failed', 'undelivered'))
+  )::int as n`);
+  return row?.n ?? 0;
+}
+
+export interface SchedulerHealth {
+  state: "ok" | "stale" | "failing" | "never";
+  lastRun: Date | null;
+  errors: string[];
+}
+
+/** Whether /cron/tick is running and finishing cleanly. Escalations and every scheduled text wait on it. */
+export async function schedulerHealth(db: Db, now: Date): Promise<SchedulerHealth> {
+  const [row] = await db.query<{ value: string; updated_at: Date }>("select value, updated_at from sync_state where key = 'scheduler'");
+  if (!row) return { state: "never", lastRun: null, errors: [] };
+  const lastRun = new Date(row.updated_at);
+  let errors: string[] = [];
+  try { errors = (JSON.parse(row.value) as { errors?: string[] }).errors ?? []; } catch {}
+  const stale = now.getTime() - lastRun.getTime() > SCHEDULER_STALE_MINUTES * 60_000;
+  return { state: stale ? "stale" : errors.length ? "failing" : "ok", lastRun, errors };
+}
+
 const KIND = { in_house: "In-house", departures: "Departures" } as const;
 const JOB = { welcome: "Welcome text", mid_stay: "Check-in text", review_request: "Review request" } as Record<string, string>;
 
 /** Things that need a person. Shared by this page and the sidebar badge. */
 export async function problemCounts(db: Db, now: Date) {
-  const [c] = await db.query<{ undelivered: number; retrying: number; escalations: number; followups: number; jobs: number; sync: number }>(
+  const [c] = await db.query<{ undelivered: number; retrying: number; unsent: number; escalations: number; followups: number; jobs: number; sync: number }>(
     `select
        (select count(*)::int from sms_delivery_receipts where status in ('failed','undelivered') and updated_at > $1::timestamptz - interval '24 hours') as undelivered,
-       (select count(*)::int from outbound_queue where status <> 'sent' and status <> 'cancelled' and last_error is not null) as retrying,
+       (select count(*)::int from outbound_queue where status = 'pending' and last_error is not null) as retrying,
+       (select count(*)::int from outbound_queue where status in ('failed', 'cancelled') and last_error <> 'guest opted out'
+          and locked_at > $1::timestamptz - interval '7 days') as unsent,
        (select count(*)::int from recovery_cases where escalation_error is not null and resolved_at is null) as escalations,
        (select count(*)::int from recovery_cases where followup_error is not null) as followups,
        (select count(*)::int from jobs where status = 'failed' and updated_at > $1::timestamptz - interval '7 days') as jobs,
        (select count(*)::int from sync_state where key like 'reviews:%' and value like '%"ok":false%') as sync`,
     [now.toISOString()],
   );
-  const counts = c ?? { undelivered: 0, retrying: 0, escalations: 0, followups: 0, jobs: 0, sync: 0 };
+  // A scheduler that has never run is shown on Operations but not counted: demo and local setups have no cron.
+  const scheduler = (await schedulerHealth(db, now)).state;
+  const counts = { ...(c ?? { undelivered: 0, retrying: 0, unsent: 0, escalations: 0, followups: 0, jobs: 0, sync: 0 }), scheduler: scheduler === "stale" || scheduler === "failing" ? 1 : 0 };
   return { ...counts, total: Object.values(counts).reduce((a, b) => a + b, 0) };
 }
 
@@ -67,8 +102,15 @@ export async function operationsPage(db: Db, now: Date) {
   );
   const retrying = await db.query<{ attempts: number; next_attempt_at: Date; last_error: string; to: string; body: string; kind: string }>(
     `select attempts, next_attempt_at, last_error, payload->>'to' as "to", payload->>'body' as body, payload->>'kind' as kind
-       from outbound_queue where status not in ('sent','cancelled') and last_error is not null order by next_attempt_at limit 50`,
+       from outbound_queue where status = 'pending' and last_error is not null order by next_attempt_at limit 50`,
   );
+  const unsent = await db.query<{ attempts: number; locked_at: Date; last_error: string; to: string; body: string }>(
+    `select attempts, locked_at, last_error, payload->>'to' as "to", payload->>'body' as body
+       from outbound_queue where status in ('failed', 'cancelled') and last_error <> 'guest opted out'
+        and locked_at > $1::timestamptz - interval '7 days' order by locked_at desc limit 50`,
+    [now.toISOString()],
+  );
+  const scheduler = await schedulerHealth(db, now);
   const caseErrors = await db.query<{ id: string; summary: string; escalation_error: string | null; followup_error: string | null; guest: string; room: string | null }>(
     `select c.id::text, c.summary, case when c.resolved_at is null then c.escalation_error end as escalation_error, c.followup_error,
             concat_ws(' ', s.guest_first_name, s.guest_last_name) as guest, s.room
@@ -86,14 +128,26 @@ export async function operationsPage(db: Db, now: Date) {
 
   const body = html`
     ${counts.total === 0
-      ? html`<p class="all-clear"><span class="tag good">All running</span> Texts, timers, and the Google sync have no errors right now.</p>`
+      ? scheduler.state === "never" ? "" : html`<p class="all-clear"><span class="tag good">All running</span> Texts, timers, and the Google sync have no errors right now.</p>`
       : html`<div class="workbar">
           ${counts.undelivered ? html`<span class="chip hot"><b>${counts.undelivered}</b> not delivered</span>` : ""}
+          ${counts.scheduler ? html`<span class="chip hot">Scheduler ${scheduler.state === "stale" ? "stopped" : "failing"}</span>` : ""}
           ${counts.retrying ? html`<span class="chip hot"><b>${counts.retrying}</b> retrying</span>` : ""}
+          ${counts.unsent ? html`<span class="chip hot"><b>${counts.unsent}</b> not sent</span>` : ""}
           ${counts.escalations + counts.followups ? html`<span class="chip hot"><b>${counts.escalations + counts.followups}</b> timer errors</span>` : ""}
           ${counts.jobs ? html`<span class="chip hot"><b>${counts.jobs}</b> scheduled texts failed</span>` : ""}
           ${counts.sync ? html`<span class="chip hot"><b>${counts.sync}</b> Google sync errors</span>` : ""}
         </div>`}
+
+    <h2>Scheduler</h2>
+    ${scheduler.state === "never"
+      ? html`<p class="banner warn" role="alert"><strong>The scheduler has never run.</strong>
+          <span>Welcome texts, GM alerts, follow-ups and review requests all wait on it. Set up the cron for /cron/tick.</span></p>`
+      : scheduler.state === "stale"
+        ? html`<p class="banner warn" role="alert"><strong>The scheduler hasn’t run for ${timeAgo(scheduler.lastRun, now).replace(/ ago$/, "")}.</strong>
+            <span>GM alerts and scheduled texts are waiting. Check the cron job.</span></p>`
+        : html`<p>${status(scheduler.state === "ok", "Running", "Last run had errors")} <span class="muted small">last run ${timeAgo(scheduler.lastRun, now)}</span></p>`}
+    ${scheduler.errors.length ? html`<ul class="err small">${scheduler.errors.map((e) => html`<li>${e}</li>`)}</ul>` : ""}
 
     <h2>Daily reports</h2>
     <div class="table-wrap">
@@ -159,6 +213,19 @@ export async function operationsPage(db: Db, now: Date) {
           )}
         </table></div>`
       : html`<p class="ok-line">Nothing waiting.</p>`}
+
+    <h2>Texts that couldn’t be sent · 7 days</h2>
+    ${unsent.length
+      ? html`<div class="table-wrap"><table>
+          <tr><th>To</th><th>Message</th><th>Tries</th><th>Why</th><th>When</th></tr>
+          ${unsent.map(
+            (u) => html`<tr>
+              <td>${u.to}</td><td class="clip">${u.body}</td><td>${u.attempts}</td>
+              <td class="clip err">${u.last_error}</td><td class="muted">${timeAgo(u.locked_at, now)}</td>
+            </tr>`,
+          )}
+        </table></div>`
+      : html`<p class="ok-line">None.</p>`}
 
     <h2>Escalations and follow-ups</h2>
     ${caseErrors.length

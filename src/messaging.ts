@@ -9,6 +9,7 @@ export interface OutboundMessage {
   fromName?: string;
   /** Sending number for SMS (the hotel's own Twilio number). Falls back to the messaging service. */
   from?: string | null;
+  outboxId?: string;
 }
 
 export interface Messenger {
@@ -29,6 +30,13 @@ export class ConsoleMessenger implements Messenger {
 
 /** A request might have succeeded remotely. Automatic resend could duplicate it. */
 export class DeliveryUncertainError extends Error {}
+
+/** The provider refused this message for good (bad number, unsubscribed, blocked). Retrying won't help. */
+export class ProviderRejectedError extends Error {
+  constructor(message: string, readonly code: number | null) { super(message); }
+}
+/** Rate limits and server errors are worth retrying; any other 4xx is a final answer. */
+const permanent = (status: number) => status >= 400 && status < 500 && status !== 429;
 async function providerFetch(url: string, init: RequestInit) {
   try { return await fetch(url, { ...init, signal: AbortSignal.timeout(30_000) }); }
   catch (error) { throw new DeliveryUncertainError(`Provider send outcome unknown: ${(error as Error).message}`); }
@@ -45,7 +53,9 @@ export class TwilioSms {
     private readonly messagingServiceSid: string,
     private readonly statusCallback?: string,
   ) {}
-  async send(to: string, body: string, from?: string | null) {
+  async send(to: string, body: string, from?: string | null, outboxId?: string) {
+    const callback = this.statusCallback ? new URL(this.statusCallback) : null;
+    if (callback && outboxId) callback.searchParams.set("rl_outbox", outboxId);
     const res = await providerFetch(`https://api.twilio.com/2010-04-01/Accounts/${this.accountSid}/Messages.json`, {
       method: "POST",
       headers: {
@@ -54,11 +64,14 @@ export class TwilioSms {
       },
       body: new URLSearchParams(
         { ...(from ? { To: to, Body: body, From: from } : { To: to, Body: body, MessagingServiceSid: this.messagingServiceSid }),
-          ...(this.statusCallback ? { StatusCallback: this.statusCallback } : {}) },
+          ...(callback ? { StatusCallback: callback.toString() } : {}) },
       ),
     });
-    const json = (await providerJson(res)) as { sid?: string; message?: string };
-    if (!res.ok || !json.sid) throw new Error(`Twilio ${res.status}: ${json.message ?? "send failed"}`);
+    const json = (await providerJson(res)) as { sid?: string; message?: string; code?: number };
+    if (!res.ok || !json.sid) {
+      const message = `Twilio ${res.status}${json.code ? ` (code ${json.code})` : ""}: ${json.message ?? "send failed"}`;
+      throw permanent(res.status) ? new ProviderRejectedError(message, json.code ?? null) : new Error(message);
+    }
     return json.sid;
   }
 }
@@ -75,7 +88,10 @@ export class ResendEmail {
       body: JSON.stringify({ from: fromName ? `${fromName} <${this.fromAddress}>` : this.fromAddress, to, subject, text }),
     });
     const json = (await providerJson(res)) as { id?: string; message?: string };
-    if (!res.ok || !json.id) throw new Error(`Resend ${res.status}: ${json.message ?? "send failed"}`);
+    if (!res.ok || !json.id) {
+      const message = `Resend ${res.status}: ${json.message ?? "send failed"}`;
+      throw permanent(res.status) ? new ProviderRejectedError(message, null) : new Error(message);
+    }
     return json.id;
   }
 }
@@ -88,7 +104,7 @@ export class LiveMessenger implements Messenger {
   async send(msg: OutboundMessage) {
     if (msg.channel === "sms") {
       if (!this.sms) throw new Error("SMS is not configured (TWILIO_* env vars)");
-      return { providerId: await this.sms.send(msg.to, msg.body, msg.from) };
+      return { providerId: await this.sms.send(msg.to, msg.body, msg.from, msg.outboxId) };
     }
     if (!this.email) throw new Error("Email is not configured (RESEND_API_KEY, EMAIL_FROM)");
     return { providerId: await this.email.send(msg.to, msg.subject ?? "", msg.body, msg.fromName) };
@@ -97,9 +113,11 @@ export class LiveMessenger implements Messenger {
 
 export function messengerFromEnv(env = process.env): Messenger {
   if (env.MESSAGING_MODE !== "live") return new ConsoleMessenger();
+  // Behind Vercel deployment protection, Twilio's delivery callbacks need the automation bypass token.
+  const bypass = env.VERCEL_AUTOMATION_BYPASS_SECRET ? `?x-vercel-protection-bypass=${encodeURIComponent(env.VERCEL_AUTOMATION_BYPASS_SECRET)}` : "";
   const sms =
     env.TWILIO_ACCOUNT_SID && env.TWILIO_AUTH_TOKEN
-      ? new TwilioSms(env.TWILIO_ACCOUNT_SID, env.TWILIO_AUTH_TOKEN, env.TWILIO_MESSAGING_SERVICE_SID ?? "", env.PUBLIC_URL ? `${env.PUBLIC_URL.replace(/\/$/, "")}/webhooks/twilio/status` : undefined)
+      ? new TwilioSms(env.TWILIO_ACCOUNT_SID, env.TWILIO_AUTH_TOKEN, env.TWILIO_MESSAGING_SERVICE_SID ?? "", env.PUBLIC_URL ? `${env.PUBLIC_URL.replace(/\/$/, "")}/webhooks/twilio/status${bypass}` : undefined)
       : null;
   const email = env.RESEND_API_KEY && env.EMAIL_FROM ? new ResendEmail(env.RESEND_API_KEY, env.EMAIL_FROM) : null;
   return new LiveMessenger(sms, email);

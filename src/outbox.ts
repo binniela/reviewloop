@@ -1,4 +1,4 @@
-import { DeliveryUncertainError } from "./messaging.js";
+import { DeliveryUncertainError, ProviderRejectedError } from "./messaging.js";
 import type { Db } from "./db.js";
 import { isOptedOut, sendAndLog, type SendOptions } from "./guest.js";
 import type { Messenger } from "./messaging.js";
@@ -7,6 +7,9 @@ export const deferredMessenger: Messenger = {
   deferred: true,
   send: async () => { throw new Error("Deferred messages must be persisted before dispatch"); },
 };
+
+/** About four hours of retries with the backoff below, then a person has to look at it on Operations. */
+export const MAX_SEND_ATTEMPTS = 8;
 
 /** Durable retries for inbound side effects. A provider acceptance is not proof of handset delivery. */
 export async function dispatchOutbox(db: Db, messenger: Messenger, now = new Date()) {
@@ -27,19 +30,24 @@ export async function dispatchOutbox(db: Db, messenger: Messenger, now = new Dat
         result.cancelled++;
         continue;
       }
-      await sendAndLog(db, messenger, { ...o, at: now, dedupeKey: `outbox:${row.id}` });
+      await sendAndLog(db, messenger, { ...o, outboxId: row.id, at: now, dedupeKey: `outbox:${row.id}` });
       await db.query("update outbound_queue set status = 'sent', sent_at = $2, last_error = null where id = $1", [row.id, now.toISOString()]);
       result.sent++;
     } catch (error) {
       const message = (error as Error).message;
+      if (error instanceof ProviderRejectedError || row.attempts >= MAX_SEND_ATTEMPTS) {
+        await db.query("update outbound_queue set status = 'failed', last_error = $2 where id = $1 and status = 'sending'", [row.id, message]);
+        result.errors.push(`message ${row.id}: ${message}`);
+        continue;
+      }
       if (error instanceof DeliveryUncertainError) {
-        await db.query("update outbound_queue set status = 'cancelled', last_error = $2 where id = $1", [row.id, message]);
+        await db.query("update outbound_queue set status = 'cancelled', last_error = $2 where id = $1 and status = 'sending'", [row.id, message]);
         result.errors.push(`message ${row.id}: ${message}`);
         continue;
       }
       // Retain every failure for inspection; cap retry frequency rather than dropping messages.
       const retry = new Date(now.getTime() + Math.min(60, 2 ** Math.min(row.attempts, 6)) * 60_000);
-      await db.query("update outbound_queue set status = 'pending', next_attempt_at = $2, last_error = $3 where id = $1", [row.id, retry.toISOString(), message]);
+      await db.query("update outbound_queue set status = 'pending', next_attempt_at = $2, last_error = $3 where id = $1 and status = 'sending'", [row.id, retry.toISOString(), message]);
       result.errors.push(`message ${row.id}: ${message}`);
     }
   }

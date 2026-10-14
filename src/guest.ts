@@ -1,4 +1,4 @@
-import { DeliveryUncertainError } from "./messaging.js";
+import { DeliveryUncertainError, ProviderRejectedError } from "./messaging.js";
 import type { Db } from "./db.js";
 import type { Messenger, OutboundMessage } from "./messaging.js";
 import type { Property } from "./properties.js";
@@ -60,6 +60,8 @@ export interface SendOptions {
   caseId?: string | null;
   at?: Date;
   dedupeKey?: string;
+  /** Correlates Twilio's signed callback with a send whose API response was lost. */
+  outboxId?: string;
 }
 
 /** Sends and logs. Callers decide whether the message is allowed; see canTextGuest. */
@@ -82,8 +84,18 @@ export async function sendAndLog(db: Db, messenger: Messenger, o: SendOptions): 
     subject: o.subject,
     fromName: o.property.name,
     from: o.channel === "sms" ? o.property.sms_from : undefined,
+    outboxId: o.outboxId,
   };
-  const { providerId } = await messenger.send(msg);
+  let providerId: string;
+  try {
+    ({ providerId } = await messenger.send(msg));
+  } catch (error) {
+    // Twilio 21610: the guest texted STOP to the carrier-level opt-out. Honor it here too.
+    if (error instanceof ProviderRejectedError && error.code === 21610 && o.channel === "sms") {
+      await db.query("insert into opt_outs (phone, opted_out_at) values ($1, $2) on conflict do nothing", [o.to, (o.at ?? new Date()).toISOString()]);
+    }
+    throw error;
+  }
   try {
   await db.query(
     `insert into messages (property_id, stay_id, case_id, direction, channel, kind, from_addr, to_addr, body, provider_id, created_at, dedupe_key)
