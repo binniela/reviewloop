@@ -54,6 +54,7 @@ export class GoogleBusinessProfile implements ReviewSource {
     if (this.token && this.token.expires > Date.now() + 60_000) return this.token.value;
     const res = await fetch("https://oauth2.googleapis.com/token", {
       method: "POST",
+      signal: AbortSignal.timeout(15_000),
       headers: { "Content-Type": "application/x-www-form-urlencoded" },
       body: new URLSearchParams({
         client_id: this.clientId,
@@ -81,7 +82,7 @@ export class GoogleBusinessProfile implements ReviewSource {
       url.searchParams.set("pageSize", "50");
       url.searchParams.set("orderBy", "updateTime desc");
       if (pageToken) url.searchParams.set("pageToken", pageToken);
-      const res = await fetch(url, { headers: { Authorization: `Bearer ${await this.accessToken()}` } });
+      const res = await fetch(url, { headers: { Authorization: `Bearer ${await this.accessToken()}` }, signal: AbortSignal.timeout(15_000) });
       const json = (await res.json()) as {
         reviews?: GoogleReview[];
         nextPageToken?: string;
@@ -116,6 +117,7 @@ export class GoogleBusinessProfile implements ReviewSource {
   async postReply(_property: Property, externalId: string, text: string): Promise<void> {
     const res = await fetch(`https://mybusiness.googleapis.com/v4/${externalId}/reply`, {
       method: "PUT",
+      signal: AbortSignal.timeout(15_000),
       headers: { Authorization: `Bearer ${await this.accessToken()}`, "Content-Type": "application/json" },
       body: JSON.stringify({ comment: text }),
     });

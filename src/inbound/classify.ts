@@ -111,7 +111,7 @@ export class ClaudeClassifier implements Classifier {
             content: `${context.lastOutbound ? `Our last text to the guest: ${context.lastOutbound}\n\n` : ""}Guest's message: ${text}`,
           },
         ],
-      });
+      }, { timeout: 5_000, maxRetries: 0 });
       const raw = msg.content
         .filter((b): b is Anthropic.TextBlock => b.type === "text")
         .map((b) => b.text)

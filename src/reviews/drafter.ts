@@ -61,7 +61,7 @@ export class ClaudeDrafter implements ReplyDrafter {
       max_tokens: 400,
       system: SYSTEM,
       messages: [{ role: "user", content: user }],
-    });
+    }, { timeout: 15_000, maxRetries: 0 });
     const text = msg.content
       .filter((b): b is Anthropic.TextBlock => b.type === "text")
       .map((b) => b.text)
