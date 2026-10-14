@@ -10,9 +10,10 @@
   "scripts": {
     "start": "electron .",
     "configure": "node configure.js",
-    "dist:mac": "node configure.js && electron-builder --mac",
-    "dist:win": "node configure.js && electron-builder --win",
-    "dist": "node configure.js && electron-builder --mac --win"
+    "signing:check": "node -e \"const {plan}=require('./build.js');const p=plan();console.log(p.problems.length?'Missing:\\n- '+p.problems.join('\\n- '):'Signing is ready for '+(process.argv.slice(1).join(' ')||'Mac and Windows'));process.exit(p.problems.length?1:0)\"",
+    "dist": "node build.js",
+    "dist:mac": "node build.js --mac",
+    "dist:win": "node build.js --win"
   },
   "devDependencies": {
     "electron": "44.4.5",
@@ -22,17 +23,52 @@
     "appId": "com.reviewloop.desktop",
     "productName": "Reviewloop",
     "copyright": "Reviewloop",
-    "directories": { "output": "dist", "buildResources": "build" },
-    "files": ["main.js", "preload.js", "pages/**", "app-config.json", "build/badge.png"],
+    "directories": {
+      "output": "dist",
+      "buildResources": "build"
+    },
+    "files": [
+      "main.js",
+      "preload.js",
+      "pages/**",
+      "app-config.json",
+      "build/badge.png"
+    ],
     "mac": {
       "category": "public.app-category.business",
-      "target": [{ "target": "dmg", "arch": ["arm64", "x64"] }],
-      "identity": null,
-      "darkModeSupport": true
+      "target": [
+        {
+          "target": "dmg",
+          "arch": [
+            "universal"
+          ]
+        }
+      ],
+      "darkModeSupport": true,
+      "hardenedRuntime": true,
+      "gatekeeperAssess": false,
+      "entitlements": "build/entitlements.mac.plist",
+      "entitlementsInherit": "build/entitlements.mac.plist",
+      "notarize": true
     },
-    "dmg": { "title": "Reviewloop" },
+    "dmg": {
+      "title": "Reviewloop"
+    },
     "win": {
-      "target": [{ "target": "nsis", "arch": ["x64"] }]
+      "target": [
+        {
+          "target": "nsis",
+          "arch": [
+            "x64"
+          ]
+        }
+      ],
+      "signtoolOptions": {
+        "signingHashAlgorithms": [
+          "sha256"
+        ],
+        "rfc3161TimeStampServer": "http://timestamp.digicert.com"
+      }
     },
     "nsis": {
       "oneClick": true,

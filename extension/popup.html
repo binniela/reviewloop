@@ -15,22 +15,23 @@
       <h1>Connect to your hotel.</h1>
       <p>Enter the Reviewloop address your manager gave you.</p>
       <form id="setup-form">
-        <input id="url" placeholder="reviewloop.yourhotel.com" required />
-        <p class="err" id="err"></p>
+        <label for="url">Reviewloop address</label>
+        <input id="url" placeholder="reviewloop.yourhotel.com" autocomplete="url" required />
+        <p class="err" id="err" role="alert"></p>
         <button type="submit">Connect</button>
       </form>
     </section>
 
     <section id="status" hidden>
       <div class="stats">
-        <a class="stat" data-go="/issues"><b id="unacked">–</b>Nobody on it</a>
-        <a class="stat" data-go="/issues"><b id="urgent">–</b>Urgent</a>
-        <a class="stat" data-go="/"><b id="awaiting">–</b>Replies waiting</a>
+        <button type="button" class="stat" data-go="/issues"><b id="unacked">–</b>Nobody on it</button>
+        <button type="button" class="stat" data-go="/issues?view=urgent"><b id="urgent">–</b>Urgent</button>
+        <button type="button" class="stat" data-go="/"><b id="awaiting">–</b>Replies waiting</button>
       </div>
       <p class="latest" id="latest" hidden></p>
       <p class="note" id="note" hidden></p>
       <div class="actions">
-        <button type="button" data-go="/issues" id="primary">Open guest issues</button>
+        <button type="button" data-go="/issues" id="primary">Open the console</button>
         <button type="button" class="secondary" data-go="/">Review replies</button>
       </div>
     </section>
