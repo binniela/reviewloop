@@ -4,7 +4,7 @@ import { approveConsent, recordConsent } from "../src/consent.js";
 import type { Db } from "../src/db.js";
 import { KeywordClassifier } from "../src/inbound/classify.js";
 import { handleInbound } from "../src/inbound/handle.js";
-import { replyToGuest, runCaseTimers } from "../src/inbound/cases.js";
+import { acknowledgeCase, replyToGuest, runCaseTimers } from "../src/inbound/cases.js";
 import { ConsoleMessenger, type Messenger } from "../src/messaging.js";
 import { dispatchOutbox } from "../src/outbox.js";
 import { TemplateDrafter } from "../src/reviews/drafter.js";
@@ -30,6 +30,32 @@ async function fixture() {
 const outage: Messenger = { send: async () => { throw new Error("provider unavailable"); } };
 
 describe("durable guest processing", () => {
+  it("keeps the first staff claimant when two people acknowledge together", async () => {
+    const f = await fixture();
+    await handleInbound(f.db, { messenger: f.messenger, classifier: f.classifier, now: () => START }, sms("AC broken"));
+    const [c] = await f.db.query<{ id: string }>("select id::text from recovery_cases");
+    await Promise.all([acknowledgeCase(f.db, c!.id, "A", later(1)), acknowledgeCase(f.db, c!.id, "B", later(1))]);
+    const [row] = await f.db.query<{ acknowledged_by: string; acknowledged_at: Date }>("select acknowledged_by, acknowledged_at from recovery_cases where id = $1", [c!.id]);
+    expect(["A", "B"]).toContain(row!.acknowledged_by);
+    expect(new Date(row!.acknowledged_at).toISOString()).toBe(later(1).toISOString());
+  });
+
+  it("claims queued messages once across overlapping dispatch calls", async () => {
+    const f = await fixture();
+    await f.db.query("insert into outbound_queue (payload, next_attempt_at) values ($1, $2)", [JSON.stringify({
+      property: { id: "sunset", name: "Sunset", sms_from: "+16265550000" }, kind: "alert", channel: "sms", to: "+16265559001", body: "Help",
+    }), START.toISOString()]);
+    await Promise.all([dispatchOutbox(f.db, f.messenger, START), dispatchOutbox(f.db, f.messenger, START)]);
+    expect(f.messenger.sent.filter(m => m.body === "Help")).toHaveLength(1);
+    expect(await f.db.query("select id from outbound_queue where status = 'sent'")).toHaveLength(1);
+  });
+
+  it("re-imports the same report without another stay or event", async () => {
+    const f = await fixture();
+    await Promise.all([ingest(f.deps, "sunset", "in_house", csv), ingest(f.deps, "sunset", "in_house", csv)]);
+    expect(await f.db.query("select id from stays where confirmation = '1'")).toHaveLength(1);
+    expect(await f.db.query("select id from events where idempotency_key like 'sunset:1:%'")).toHaveLength(2);
+  });
   it("retries failed alerts independently of duplicate webhooks, without duplicate cases or successful recipients", async () => {
     const f = await fixture();
     const partial: Messenger = { send: async (m) => m.to.includes("desk@") ? outage.send(m) : f.messenger.send(m) };
