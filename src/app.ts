@@ -64,6 +64,9 @@ export function createApp(deps: AppDeps) {
   if ((deps.production || process.env.NODE_ENV === "production" || process.env.MESSAGING_MODE === "live") && !deps.adminPassword) {
     throw new Error("ADMIN_PASSWORD is required in production/live mode");
   }
+  if ((deps.production || process.env.NODE_ENV === "production" || process.env.MESSAGING_MODE === "live") && deps.allowUnsignedWebhooks) {
+    throw new Error("Unsigned Twilio webhooks are forbidden in production/live mode");
+  }
   const app = new Hono<Env>();
   const now = () => deps.now?.() ?? new Date();
   const classifier = deps.classifier ?? classifierFromEnv();

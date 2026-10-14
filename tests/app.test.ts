@@ -32,6 +32,13 @@ describe("http app", () => {
     expect((await app.request("/cron/tick", { headers: { Authorization: "Bearer nope" } })).status).toBe(401);
   });
 
+  it("rejects unsigned Twilio webhook mode in a production app", async () => {
+    const db = await testDb();
+    expect(() => createApp({ db, messenger: new ConsoleMessenger(true), source: new MockReviewSource(),
+      drafter: new TemplateDrafter(), adminPassword: "pw", production: true, allowUnsignedWebhooks: true })).toThrow(/Unsigned Twilio/);
+    await db.close();
+  });
+
   it("ingests a report by API, then a tick sends requests and drafts replies", async () => {
     const { app, messenger, db } = await setup();
     const auth = { Authorization: "Bearer s3cret" };
