@@ -408,6 +408,9 @@ button.secondary:hover, .btn.secondary:hover { background:var(--hover); box-shad
 .tag.err { color:var(--warn); background:var(--warn-bg); border-color:var(--warn-line); }
 .tag.err::before, .tag.good::before { content:""; width:6px; height:6px; border-radius:50%; background:currentColor; }
 .tag.good { color:var(--ok); background:var(--ok-bg); border-color:transparent; }
+.tag.warn { color:var(--gold); background:var(--sunk); border-color:var(--line); }
+.alerts { display:grid; gap:8px; margin:0 0 8px; }
+.alert-line { display:flex; align-items:baseline; gap:10px; flex-wrap:wrap; margin:0; padding:12px 16px; border:1px solid var(--line); border-radius:var(--r); background:var(--surface); }
 .err { color:var(--warn); } .good { color:var(--ok); }
 .empty { padding:40px 20px; text-align:center; color:var(--muted); border:1px dashed var(--line-2); border-radius:var(--r); background:var(--surface); }
 .muted { color:var(--muted); } .small { font-size:12.5px; }

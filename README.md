@@ -7,7 +7,7 @@ Guest texting, service recovery, and review management for independent hotels on
 
 ## Quick start
 
-Needs Node 22.12 or newer (or a supported newer Node LTS).
+Needs Node 24 (`.nvmrc`; what Vercel and CI run).
 
 ```bash
 npm install
@@ -45,8 +45,10 @@ to `.env` to turn real services on one at a time.
 - `/operations` For the GM: whether today's reports are in, the Google sync, and any text, retry,
   escalation, follow-up or scheduled message that failed. The sidebar shows a red count when something needs a person.
 
-Public: `/checkin/:propertyId` (opt-in page), `/webhooks/twilio/sms` (Twilio, signature-checked).
-Machine: `GET /cron/tick` and `POST /api/ingest/:propertyId?kind=...` with `Authorization: Bearer $CRON_SECRET`.
+Public: `/checkin/:propertyId` (opt-in page), `/webhooks/twilio/sms` (Twilio, signature-checked),
+`/health` (database reachable and migrations current; for uptime checks).
+Machine: `GET /cron/tick` and `POST /api/ingest/:propertyId?kind=...` with `Authorization: Bearer $CRON_SECRET`;
+`GET /health/alerts` with `Bearer $MONITOR_TOKEN` (503 when anything critical is wrong, the same list as the top of Operations).
 
 ## Apps: web, Mac, Windows, Chrome
 
@@ -91,14 +93,18 @@ vercel deploy --prod
 
 `api/index.ts` serves the app; `public/` (icons, manifest, service worker) is served by Vercel's CDN.
 
-- **No `DATABASE_URL`: demo mode.** Two sample hotels in an in-memory database, mock Google,
+Launch checklist, Supabase setup, monitoring and backups: [docs/LAUNCH.md](docs/LAUNCH.md).
+What the GM does when something breaks: [docs/RUNBOOK.md](docs/RUNBOOK.md).
+
+- **Preview deployments with no `DATABASE_URL`, or `REVIEWLOOP_DEMO=1`: demo mode.** Two sample hotels in an in-memory database, mock Google,
   messages printed, sign in with `demo` / `demo`. Each serverless instance has its own copy and
   resets when it restarts. Good for showing the product; not for a hotel.
 - **For real:** set `DATABASE_URL` (Supabase pooler URL), `ADMIN_PASSWORD`, `CRON_SECRET`,
   `PUBLIC_URL`, `MESSAGING_MODE=live`, and the Twilio and Google credentials. Startup refuses to
-  run in production without them.
+  run in production without them, and refuses `MESSAGING_MODE=live` on preview deployments.
 - **Scheduler:** something has to call `GET /cron/tick` with `Authorization: Bearer $CRON_SECRET`
-  every few minutes (escalations wait on it). Vercel Cron does this on Pro (add
+  every few minutes (escalations wait on it). Overlapping calls are safe: one runs, the other returns
+  `{"skipped": true}`. Vercel Cron does this on Pro (add
   `"crons": [{ "path": "/cron/tick", "schedule": "*/5 * * * *" }]` to `vercel.json`); Hobby only
   allows daily jobs, so use Supabase `pg_cron` or any external cron there.
 
