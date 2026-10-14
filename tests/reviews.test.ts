@@ -34,7 +34,7 @@ async function drafts(db: Db) {
 }
 
 describe("decide", () => {
-  it("auto-posts 4 and 5 stars by default and routes the rest to a person", () => {
+  it("auto-posts 4 and 5 stars when explicitly enabled and routes the rest to a person", () => {
     expect(decide("auto_high", 5, "Great stay").decision).toBe("auto");
     expect(decide("auto_high", 4, null).decision).toBe("auto");
     expect(decide("auto_high", 3, "Fine").decision).toBe("approval");
@@ -52,6 +52,7 @@ describe("decide", () => {
 describe("syncReviews", () => {
   it("drafts new reviews, auto-posts high ratings, queues the rest, and is idempotent", async () => {
     const db = await testDb();
+    await db.query("update properties set reply_mode = 'auto_high'");
     const source = new MockReviewSource({
       sunset: [
         review("a", 5, "Clean and quiet", "Dana R"),
@@ -94,7 +95,7 @@ describe("syncReviews", () => {
     ]);
   });
 
-  it("matches a review to the stay and passes recovery notes to the drafter as private context", async () => {
+  it("keeps heuristic stay matches out of private drafting context", async () => {
     const db = await testDb();
     await reconcile(
       db,
@@ -109,7 +110,7 @@ describe("syncReviews", () => {
     const source = new MockReviewSource({ sunset: [review("p", 3, "AC was noisy at first", "Anita P")] });
     const drafter = new RecordingDrafter();
     await syncReviews(db, "sunset", { source, drafter, now: NOW });
-    expect(drafter.calls[0]!.stayNotes).toEqual(["Issue: AC loud. Resolved: Moved to room 112."]);
+    expect(drafter.calls[0]!.stayNotes).toEqual([]);
     const [r] = await db.query<{ confirmation: string }>(
       "select s.confirmation from reviews r join stays s on s.id = r.stay_id",
     );
@@ -128,6 +129,7 @@ describe("syncReviews", () => {
   it("marks failed posts so they can be retried from the queue, and supports dismiss", async () => {
     const db = await testDb();
     const source = new MockReviewSource({ sunset: [review("a", 5, "Nice", "Dana R"), review("b", 1, "Bad", "Eli K")] });
+    await db.query("update properties set reply_mode = 'auto_high'");
     source.failNextPost = "Google reply 503";
     const s = await syncReviews(db, "sunset", { source, drafter: new RecordingDrafter(), now: NOW });
     expect(s.errors).toEqual(["Google reply 503"]);

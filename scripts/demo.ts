@@ -2,7 +2,7 @@
 // messages, mock Google, keyword triage (or Claude if ANTHROPIC_API_KEY is set).
 //   npm run demo
 import { ingest, tick, type AppDeps } from "../src/app.js";
-import { recordConsent } from "../src/consent.js";
+import { approveConsent, recordConsent } from "../src/consent.js";
 import { migrate, openPglite } from "../src/db.js";
 import { classifierFromEnv } from "../src/inbound/classify.js";
 import { resolveCase } from "../src/inbound/cases.js";
@@ -70,7 +70,8 @@ const report = (status: string, out = "") =>
   `Confirmation,Guest Name,Email,Phone,SMS Opt In,Room,Arrival,Departure,Status,Check Out Time
 30001,"PATEL, ANITA",anita@example.com,,N,104,10/11/2026,10/14/2026,${status},${out}`;
 await ingest(deps, "sunset", "in_house", report("In House"));
-await recordConsent(db, messenger, { propertyId: "sunset", lastName: "Patel", room: "104", phone: "626-555-0101", agreed: true }, clock);
+const consent = await recordConsent(db, messenger, { propertyId: "sunset", lastName: "Patel", room: "104", phone: "626-555-0101", agreed: true }, clock);
+if (consent.status === "pending") await approveConsent(db, messenger, consent.consentId, "demo-staff", clock);
 flush();
 await run();
 
@@ -104,7 +105,7 @@ source.reviews.sunset!.push({
   existingReply: null,
 });
 await run();
-console.log("   Reply posted to Google:", JSON.stringify(source.replies.at(-1)?.text));
+console.log("   Reply awaiting approval:", await db.query("select draft, status from reply_drafts"));
 
 const [s] = await db.query<{ satisfaction: number }>("select satisfaction from stays");
 const [snap] = await db.query<{ review_count: number; avg_rating: number }>(

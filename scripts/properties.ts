@@ -20,7 +20,7 @@ const schema = z.array(
     quiet_end: z.string().default("09:00"),
     google_place_id: z.string().nullable().default(null),
     google_location: z.string().nullable().default(null),
-    reply_mode: z.enum(["approval_all", "auto_high", "auto_all"]).default("auto_high"),
+    reply_mode: z.enum(["approval_all", "auto_high", "auto_all"]).default("approval_all"),
     voice_notes: z.string().default(""),
     signoff: z.string().default(""),
     request_template: z.string().optional(),

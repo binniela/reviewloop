@@ -1,0 +1,23 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Offline · Reviewloop</title>
+    <style>
+      :root { --paper:#FBFAF7; --ink:#29251E; --muted:#706D67; color-scheme:light dark; }
+      @media (prefers-color-scheme: dark) { :root { --paper:#171512; --ink:#F3EFE8; --muted:rgba(243,239,232,.64); } }
+      body { margin:0; min-height:100vh; display:grid; place-items:center; background:var(--paper); color:var(--ink); font:15px/1.5 ui-sans-serif, system-ui, sans-serif; padding:16px; text-align:center; }
+      h1 { font-weight:400; font-size:34px; letter-spacing:-.035em; margin:0 0 8px; }
+      p { color:var(--muted); margin:0 0 20px; }
+      button { font:inherit; padding:10px 16px; border-radius:8px; border:0; background:var(--ink); color:var(--paper); cursor:pointer; }
+    </style>
+  </head>
+  <body>
+    <main>
+      <h1>You're offline.</h1>
+      <p>Guest texts are still being received. They'll be here when you reconnect.</p>
+      <button onclick="location.reload()">Try again</button>
+    </main>
+  </body>
+</html>

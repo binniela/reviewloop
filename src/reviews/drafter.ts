@@ -1,3 +1,4 @@
+import { KeywordClassifier } from "../inbound/classify.js";
 import Anthropic from "@anthropic-ai/sdk";
 import type { Property } from "../properties.js";
 
@@ -78,9 +79,13 @@ export class TemplateDrafter implements ReplyDrafter {
     const hi = name ? `Thank you, ${name}.` : "Thank you for your review.";
     const sign = ctx.property.signoff ? `\n${ctx.property.signoff}` : "";
     const r = ctx.review.rating ?? 3;
+    const classification = await new KeywordClassifier().classify(ctx.review.body ?? "");
+    if (classification.sentiment === "negative" || /\b(but|however|although)\b/i.test(ctx.review.body ?? "")) {
+      return `${hi} We're sorry there were problems during your stay at ${ctx.property.name}. Please contact the front desk so we can discuss what happened.${sign}`;
+    }
     if (r >= 4) return `${hi} We're glad you enjoyed your stay at ${ctx.property.name} and hope to see you again soon.${sign}`;
     if (r === 3)
-      return `${hi} We appreciate the honest feedback and are looking into what you mentioned. We hope to give you a better stay next time.${sign}`;
+      return `${hi} We appreciate your feedback. Please contact the front desk if you would like to discuss your stay. We hope to give you a better stay next time.${sign}`;
     return `${hi} We're sorry your stay at ${ctx.property.name} fell short. Please reach out to us directly so we can make this right.${sign}`;
   }
 }

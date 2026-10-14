@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { createApp, ingest, tick, type AppDeps } from "../src/app.js";
-import { recordConsent } from "../src/consent.js";
+import { approveConsent, recordConsent } from "../src/consent.js";
 import type { Db } from "../src/db.js";
 import { KeywordClassifier, enforceSafety, type Classification, type Classifier } from "../src/inbound/classify.js";
 import { resolveCase, acknowledgeCase, replyToGuest } from "../src/inbound/cases.js";
@@ -157,8 +157,8 @@ describe("inbound texts", () => {
   it("forwards requests without counting them as complaints", async () => {
     const { db, h } = await setup();
     const res = await h.text("Could we get extra towels please?");
-    expect(res.action).toBe("request_forwarded");
-    expect(await db.query("select 1 from recovery_cases")).toHaveLength(0);
+    expect(res.action).toBe("case_opened");
+    expect(await db.query("select kind from recovery_cases")).toEqual([{ kind: "request" }]);
     expect(h.to(DESK)[0]!.body).toMatch(/^Request from Jo Park/);
     expect(h.to(GUEST).at(-1)!.body).toBe("Got it, Jo. We've passed this to the front desk.");
   });
@@ -276,7 +276,9 @@ describe("check-in opt-in", () => {
     const h = harness(db, "2026-10-13T00:00:00Z");
     await h.ingest(inHouse("N"), "in_house");
     const res = await recordConsent(db, h.messenger, { propertyId: "sunset", lastName: "park", room: "104", phone: "(626) 555-0177", agreed: true }, h.now());
-    expect(res.status).toBe("linked");
+    expect(res.status).toBe("pending");
+    if (res.status !== "pending") throw new Error("expected pending consent");
+    expect((await approveConsent(db, h.messenger, res.consentId, "staff", h.now())).status).toBe("linked");
     expect(h.to("+16265550177")[0]!.body).toMatch(/^Hi Jo, welcome to Sunset Inn/);
     // Mid-stay now goes to the number they gave us.
     h.set("2026-10-13T17:05:00Z");
@@ -290,7 +292,9 @@ describe("check-in opt-in", () => {
     const res = await recordConsent(db, h.messenger, { propertyId: "sunset", lastName: "Park", room: "104", phone: "626-555-0177", agreed: true }, h.now());
     expect(res.status).toBe("pending");
     const r = await h.ingest(inHouse("N"), "in_house");
-    expect(r.consentsLinked).toBe(1);
+    expect(r.consentsLinked).toBe(0);
+    if (res.status !== "pending") throw new Error("expected pending consent");
+    expect((await approveConsent(db, h.messenger, res.consentId, "staff", h.now())).status).toBe("linked");
   });
 
   it("requires the box to be ticked and a real number", async () => {

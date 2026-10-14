@@ -1,3 +1,4 @@
+import { DeliveryUncertainError } from "./messaging.js";
 import type { Db } from "./db.js";
 import type { Messenger, OutboundMessage } from "./messaging.js";
 import type { Property } from "./properties.js";
@@ -58,10 +59,22 @@ export interface SendOptions {
   stayId?: string | null;
   caseId?: string | null;
   at?: Date;
+  dedupeKey?: string;
 }
 
 /** Sends and logs. Callers decide whether the message is allowed; see canTextGuest. */
 export async function sendAndLog(db: Db, messenger: Messenger, o: SendOptions): Promise<string> {
+  if (o.dedupeKey) {
+    const [existing] = await db.query<{ provider_id: string }>("select provider_id from messages where dedupe_key = $1", [o.dedupeKey]);
+    if (existing) return existing.provider_id;
+  }
+  if (messenger.deferred) {
+    const [queued] = await db.query<{ id: string }>(
+      "insert into outbound_queue (payload, next_attempt_at) values ($1, $2) returning id::text",
+      [JSON.stringify(o), (o.at ?? new Date()).toISOString()],
+    );
+    return `queued:${queued!.id}`;
+  }
   const msg: OutboundMessage = {
     channel: o.channel,
     to: o.to,
@@ -71,9 +84,10 @@ export async function sendAndLog(db: Db, messenger: Messenger, o: SendOptions): 
     from: o.channel === "sms" ? o.property.sms_from : undefined,
   };
   const { providerId } = await messenger.send(msg);
+  try {
   await db.query(
-    `insert into messages (property_id, stay_id, case_id, direction, channel, kind, from_addr, to_addr, body, provider_id, created_at)
-     values ($1, $2, $3, 'out', $4, $5, $6, $7, $8, $9, $10)`,
+    `insert into messages (property_id, stay_id, case_id, direction, channel, kind, from_addr, to_addr, body, provider_id, created_at, dedupe_key)
+     values ($1, $2, $3, 'out', $4, $5, $6, $7, $8, $9, $10, $11)`,
     [
       o.property.id,
       o.stayId ?? null,
@@ -85,8 +99,12 @@ export async function sendAndLog(db: Db, messenger: Messenger, o: SendOptions): 
       o.body,
       providerId,
       (o.at ?? new Date()).toISOString(),
+      o.dedupeKey ?? null,
     ],
   );
+  } catch (error) {
+    throw new DeliveryUncertainError(`Provider accepted ${providerId}, but message logging failed: ${(error as Error).message}`);
+  }
   return providerId;
 }
 
@@ -109,7 +127,7 @@ export async function alertStaff(
   messenger: Messenger,
   property: Property,
   text: string,
-  opts: { caseId?: string | null; stayId?: string | null; includeGm?: boolean; onlyGm?: boolean; at?: Date } = {},
+  opts: { caseId?: string | null; stayId?: string | null; includeGm?: boolean; onlyGm?: boolean; at?: Date; dedupeKey?: string } = {},
 ): Promise<number> {
   const phones = opts.onlyGm ? [] : [...property.desk_phones];
   if ((opts.includeGm || opts.onlyGm) && property.gm_phone) phones.push(property.gm_phone);
@@ -118,9 +136,10 @@ export async function alertStaff(
   const failures: string[] = [];
   for (const to of new Set(phones)) {
     try {
-      await sendAndLog(db, messenger, { property, kind: "alert", channel: "sms", to, body: text, ...opts });
+      await sendAndLog(db, messenger, { property, kind: "alert", channel: "sms", to, body: text, ...opts, dedupeKey: opts.dedupeKey ? `${opts.dedupeKey}:sms:${to}` : undefined });
       sent++;
     } catch (err) {
+      if (err instanceof DeliveryUncertainError) throw err;
       failures.push(`${to}: ${(err as Error).message}`);
     }
   }
@@ -134,14 +153,17 @@ export async function alertStaff(
         body: text,
         subject: `[${property.name}] Guest needs attention`,
         ...opts,
+        dedupeKey: opts.dedupeKey ? `${opts.dedupeKey}:email:${to}` : undefined,
       });
       sent++;
     } catch (err) {
+      if (err instanceof DeliveryUncertainError) throw err;
       failures.push(`${to}: ${(err as Error).message}`);
     }
   }
   // An alert that reached nobody must surface, not disappear: the issues page still shows the case.
   if (sent === 0 && failures.length) throw new Error(`alert failed: ${failures.join("; ")}`);
+  if (sent === 0 && !messenger.deferred) throw new Error("No staff alert recipients configured");
   return sent;
 }
 

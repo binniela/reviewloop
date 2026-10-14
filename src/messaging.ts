@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 /** Outbound guest messages. Console mode records instead of sending, for development and demos. */
 
 export interface OutboundMessage {
@@ -11,6 +12,8 @@ export interface OutboundMessage {
 }
 
 export interface Messenger {
+  /** Persist side effects inside a DB transaction; dispatch after commit. */
+  deferred?: boolean;
   send(msg: OutboundMessage): Promise<{ providerId: string }>;
 }
 
@@ -20,8 +23,19 @@ export class ConsoleMessenger implements Messenger {
   async send(msg: OutboundMessage) {
     this.sent.push(msg);
     if (!this.quiet) console.log(`[${msg.channel} -> ${msg.to}] ${msg.subject ? `${msg.subject}: ` : ""}${msg.body}`);
-    return { providerId: `console-${this.sent.length}` };
+    return { providerId: `console-${randomUUID()}` };
   }
+}
+
+/** A request might have succeeded remotely. Automatic resend could duplicate it. */
+export class DeliveryUncertainError extends Error {}
+async function providerFetch(url: string, init: RequestInit) {
+  try { return await fetch(url, { ...init, signal: AbortSignal.timeout(30_000) }); }
+  catch (error) { throw new DeliveryUncertainError(`Provider send outcome unknown: ${(error as Error).message}`); }
+}
+async function providerJson(res: Response): Promise<Record<string, unknown>> {
+  try { return await res.json() as Record<string, unknown>; }
+  catch { throw new DeliveryUncertainError(`Provider returned unreadable response (${res.status}); reconcile before retrying`); }
 }
 
 export class TwilioSms {
@@ -29,19 +43,21 @@ export class TwilioSms {
     private readonly accountSid: string,
     private readonly authToken: string,
     private readonly messagingServiceSid: string,
+    private readonly statusCallback?: string,
   ) {}
   async send(to: string, body: string, from?: string | null) {
-    const res = await fetch(`https://api.twilio.com/2010-04-01/Accounts/${this.accountSid}/Messages.json`, {
+    const res = await providerFetch(`https://api.twilio.com/2010-04-01/Accounts/${this.accountSid}/Messages.json`, {
       method: "POST",
       headers: {
         Authorization: `Basic ${Buffer.from(`${this.accountSid}:${this.authToken}`).toString("base64")}`,
         "Content-Type": "application/x-www-form-urlencoded",
       },
       body: new URLSearchParams(
-        from ? { To: to, Body: body, From: from } : { To: to, Body: body, MessagingServiceSid: this.messagingServiceSid },
+        { ...(from ? { To: to, Body: body, From: from } : { To: to, Body: body, MessagingServiceSid: this.messagingServiceSid }),
+          ...(this.statusCallback ? { StatusCallback: this.statusCallback } : {}) },
       ),
     });
-    const json = (await res.json()) as { sid?: string; message?: string };
+    const json = (await providerJson(res)) as { sid?: string; message?: string };
     if (!res.ok || !json.sid) throw new Error(`Twilio ${res.status}: ${json.message ?? "send failed"}`);
     return json.sid;
   }
@@ -53,12 +69,12 @@ export class ResendEmail {
     private readonly fromAddress: string,
   ) {}
   async send(to: string, subject: string, text: string, fromName?: string) {
-    const res = await fetch("https://api.resend.com/emails", {
+    const res = await providerFetch("https://api.resend.com/emails", {
       method: "POST",
       headers: { Authorization: `Bearer ${this.apiKey}`, "Content-Type": "application/json" },
       body: JSON.stringify({ from: fromName ? `${fromName} <${this.fromAddress}>` : this.fromAddress, to, subject, text }),
     });
-    const json = (await res.json()) as { id?: string; message?: string };
+    const json = (await providerJson(res)) as { id?: string; message?: string };
     if (!res.ok || !json.id) throw new Error(`Resend ${res.status}: ${json.message ?? "send failed"}`);
     return json.id;
   }
@@ -83,7 +99,7 @@ export function messengerFromEnv(env = process.env): Messenger {
   if (env.MESSAGING_MODE !== "live") return new ConsoleMessenger();
   const sms =
     env.TWILIO_ACCOUNT_SID && env.TWILIO_AUTH_TOKEN
-      ? new TwilioSms(env.TWILIO_ACCOUNT_SID, env.TWILIO_AUTH_TOKEN, env.TWILIO_MESSAGING_SERVICE_SID ?? "")
+      ? new TwilioSms(env.TWILIO_ACCOUNT_SID, env.TWILIO_AUTH_TOKEN, env.TWILIO_MESSAGING_SERVICE_SID ?? "", env.PUBLIC_URL ? `${env.PUBLIC_URL.replace(/\/$/, "")}/webhooks/twilio/status` : undefined)
       : null;
   const email = env.RESEND_API_KEY && env.EMAIL_FROM ? new ResendEmail(env.RESEND_API_KEY, env.EMAIL_FROM) : null;
   return new LiveMessenger(sms, email);

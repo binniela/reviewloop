@@ -1,0 +1,22 @@
+:root { --paper:#FBFAF7; --surface:#fff; --ink:#29251E; --muted:#706D67; --line:#E8E4DC; --line-2:#D9D4CA; --warn:#A8402B; color-scheme:light; }
+@media (prefers-color-scheme: dark) { :root { --paper:#171512; --surface:#1F1C18; --ink:#F3EFE8; --muted:rgba(243,239,232,.64); --line:rgba(243,239,232,.09); --line-2:rgba(243,239,232,.16); --warn:#E88A73; color-scheme:dark; } }
+* { box-sizing:border-box; }
+html, body { height:100%; }
+body { margin:0; display:grid; place-items:center; padding:24px; background:var(--paper); color:var(--ink); font:14.5px/1.55 -apple-system, "Segoe UI", ui-sans-serif, system-ui, sans-serif; -webkit-font-smoothing:antialiased; }
+.drag { position:fixed; inset:0 0 auto 0; height:36px; -webkit-app-region:drag; }
+main { width:100%; max-width:400px; }
+.brand { display:flex; align-items:center; gap:9px; font-size:19px; font-weight:500; letter-spacing:-.03em; margin-bottom:40px; }
+.brand svg { width:24px; height:24px; }
+.eyebrow { display:flex; align-items:center; gap:10px; font-size:11px; letter-spacing:.09em; text-transform:uppercase; color:var(--muted); margin-bottom:16px; }
+.eyebrow i { flex:1; height:1px; background:var(--line-2); }
+h1 { font-weight:400; font-size:38px; line-height:1.05; letter-spacing:-.04em; margin:0 0 10px; }
+p { color:var(--muted); margin:0 0 24px; }
+label { display:block; font-size:13px; font-weight:500; margin-bottom:6px; }
+input { width:100%; font:inherit; color:var(--ink); padding:11px 12px; border:1px solid var(--line-2); border-radius:8px; background:var(--surface); }
+input:focus { outline:none; border-color:var(--ink); box-shadow:0 0 0 3px rgba(41,37,30,.08); }
+.row { display:flex; gap:8px; margin-top:12px; flex-wrap:wrap; }
+button { font:500 14px/1 inherit; font-family:inherit; padding:12px 16px; border-radius:8px; border:1px solid var(--ink); background:var(--ink); color:var(--paper); cursor:pointer; }
+button.secondary { background:transparent; color:var(--ink); border-color:var(--line-2); }
+button:active { transform:translateY(1px); }
+.err { color:var(--warn); font-size:13px; min-height:20px; margin:8px 0 0; }
+[hidden] { display:none !important; }

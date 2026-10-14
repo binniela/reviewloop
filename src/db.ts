@@ -6,6 +6,7 @@ import { fileURLToPath } from "node:url";
 export interface Db {
   query<T = Record<string, unknown>>(sql: string, params?: unknown[]): Promise<T[]>;
   close(): Promise<void>;
+  transaction<T>(fn: (db: Db) => Promise<T>): Promise<T>;
 }
 
 const MIGRATIONS_DIR = join(dirname(fileURLToPath(import.meta.url)), "..", "db", "migrations");
@@ -47,6 +48,14 @@ export async function openPglite(dataDir?: string): Promise<Db & { exec(sql: str
     async exec(sql: string) {
       await pg.exec(sql);
     },
+    transaction: (fn) => pg.transaction(async (tx) => {
+      const scoped: Db = {
+        query: async <T>(sql: string, params: unknown[] = []) => (await tx.query<T>(sql, params)).rows,
+        close: async () => {},
+        transaction: async (nested) => nested(scoped),
+      };
+      return fn(scoped);
+    }),
     close: () => pg.close(),
   };
 }
@@ -60,6 +69,23 @@ export async function openPostgres(connectionString: string): Promise<Db> {
     async query<T>(sql: string, params: unknown[] = []) {
       const res = await pool.query(sql, params);
       return res.rows as T[];
+    },
+    async transaction(fn) {
+      const client = await pool.connect();
+      const scoped: Db = {
+        query: async <T>(sql: string, params: unknown[] = []) => (await client.query(sql, params)).rows as T[],
+        close: async () => {},
+        transaction: async (nested) => nested(scoped),
+      };
+      try {
+        await client.query("BEGIN");
+        const result = await fn(scoped);
+        await client.query("COMMIT");
+        return result;
+      } catch (error) {
+        await client.query("ROLLBACK");
+        throw error;
+      } finally { client.release(); }
     },
     close: () => pool.end(),
   };

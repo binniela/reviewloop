@@ -1,0 +1,31 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta http-equiv="Content-Security-Policy" content="default-src 'self'; style-src 'self'; script-src 'self'" />
+    <title>Connect · Reviewloop</title>
+    <link rel="stylesheet" href="style.css" />
+  </head>
+  <body>
+    <div class="drag"></div>
+    <main>
+      <div class="brand">
+        <svg viewBox="0 0 32 32" aria-hidden="true"><path d="M16.9 8.1A8 8 0 1 0 24 15.4" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" /><circle cx="23.2" cy="8.8" r="1.7" fill="currentColor" /></svg>
+        reviewloop
+      </div>
+      <div class="eyebrow"><span>[00]</span>Setup<i></i></div>
+      <h1>Connect to your hotel.</h1>
+      <p>Enter the Reviewloop address your manager gave you. You only do this once.</p>
+      <form id="f">
+        <label for="url">Reviewloop address</label>
+        <input id="url" name="url" placeholder="reviewloop.yourhotel.com" autocomplete="url" autofocus required />
+        <p class="err" id="err" role="alert"></p>
+        <div class="row">
+          <button type="submit">Connect</button>
+          <button type="button" class="secondary" id="demo" hidden>Try the demo</button>
+        </div>
+      </form>
+    </main>
+    <script src="setup.js"></script>
+  </body>
+</html>

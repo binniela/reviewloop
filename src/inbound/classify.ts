@@ -51,11 +51,18 @@ const URGENT = /\b(now|asap|immediately|urgent|emergency|right away|help)\b|!{2,
 export class KeywordClassifier implements Classifier {
   async classify(text: string): Promise<Classification> {
     const t = text.trim();
-    const category = RULES.find((r) => r.re.test(t))?.category ?? (/\?\s*$/.test(t) ? "question" : "other");
+    let category = RULES.find((r) => r.re.test(t))?.category ?? (/\?\s*$/.test(t) ? "question" : "other");
+    const reassurance = /^(?:no (?:complaints?|problems?|issues?))(?:[,!. ]+(?:thanks?|thank you|all good)[!. ]*)?$/i.test(t);
+    const cold = /\b(freezing|too cold|too hot)\b/i.test(t);
+    if (cold) category = "maintenance";
+    const question = /^(what|when|where|how|which|could|can|would|is there)\b/i.test(t) || /\?\s*$/.test(t);
+    if (question && !PROBLEM.test(t) && category !== "safety" && !cold && category !== "request") category = "question";
     const negated = /\b(not|no|never|still)\b/i.test(t);
     const pos = POSITIVE.test(t);
     let sentiment: Classification["sentiment"];
     if (category === "safety") sentiment = "negative";
+    else if (reassurance) sentiment = "positive";
+    else if (cold) sentiment = "negative";
     else if (PROBLEM.test(t)) sentiment = RESOLVED.test(t) && !/\bstill\b/i.test(t) ? "positive" : "negative";
     else if (NEGATIVE.test(t) && !(pos && !negated)) sentiment = "negative";
     else sentiment = pos ? "positive" : "neutral";
@@ -63,7 +70,7 @@ export class KeywordClassifier implements Classifier {
       category === "safety" ? "urgent" : URGENT.test(t) && sentiment === "negative" ? "urgent" : sentiment === "positive" ? "low" : "normal";
     return {
       sentiment,
-      category: sentiment === "positive" && category === "other" ? "praise" : category,
+      category: sentiment === "positive" && !["request", "question"].includes(category) ? "praise" : category,
       urgency,
       summary: t.length > 120 ? `${t.slice(0, 117)}...` : t,
       by: "keywords",

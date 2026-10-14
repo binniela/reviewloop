@@ -1,0 +1,45 @@
+{
+  "name": "reviewloop-desktop",
+  "productName": "Reviewloop",
+  "version": "0.1.0",
+  "description": "Reviewloop for the front desk: guest issues, review replies and pilot metrics.",
+  "author": "Reviewloop",
+  "license": "ISC",
+  "private": true,
+  "main": "main.js",
+  "scripts": {
+    "start": "electron .",
+    "configure": "node configure.js",
+    "dist:mac": "node configure.js && electron-builder --mac",
+    "dist:win": "node configure.js && electron-builder --win",
+    "dist": "node configure.js && electron-builder --mac --win"
+  },
+  "devDependencies": {
+    "electron": "44.4.5",
+    "electron-builder": "26.16.1"
+  },
+  "build": {
+    "appId": "com.reviewloop.desktop",
+    "productName": "Reviewloop",
+    "copyright": "Reviewloop",
+    "directories": { "output": "dist", "buildResources": "build" },
+    "files": ["main.js", "preload.js", "pages/**", "app-config.json", "build/badge.png"],
+    "mac": {
+      "category": "public.app-category.business",
+      "target": [{ "target": "dmg", "arch": ["arm64", "x64"] }],
+      "identity": null,
+      "darkModeSupport": true
+    },
+    "dmg": { "title": "Reviewloop" },
+    "win": {
+      "target": [{ "target": "nsis", "arch": ["x64"] }]
+    },
+    "nsis": {
+      "oneClick": true,
+      "perMachine": false,
+      "shortcutName": "Reviewloop",
+      "createDesktopShortcut": true
+    },
+    "artifactName": "Reviewloop-${version}-${os}-${arch}.${ext}"
+  }
+}

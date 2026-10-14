@@ -1,4 +1,4 @@
-import { html } from "hono/html";
+import { html, raw } from "hono/html";
 import type { Db } from "../db.js";
 import { listProperties } from "../properties.js";
 import { layout, statBox } from "./layout.js";
@@ -39,21 +39,24 @@ export async function weeklyMetrics(db: Db, propertyId: string, now: Date, weeks
           from reviews r join reply_drafts d on d.review_id = r.id
          where r.property_id = $1 and d.status = 'posted' and r.reviewed_at >= w.start and r.reviewed_at < w.start + interval '1 week') as median_reply_h,
        (select count(*)::int from recovery_cases c join stays s on s.id = c.stay_id
-         where s.property_id = $1 and c.opened_at >= w.start and c.opened_at < w.start + interval '1 week') as issues,
+         where s.property_id = $1 and c.kind = 'complaint'
+           and c.opened_at >= coalesce(s.checked_in_at, s.arrival_date::timestamp at time zone (select timezone from properties where id = $1))
+           and c.opened_at < coalesce(s.checked_out_at, (s.departure_date + (select checkout_time::time from properties where id = $1)) at time zone (select timezone from properties where id = $1))
+           and c.opened_at >= w.start and c.opened_at < w.start + interval '1 week') as issues,
        (select count(*)::int from recovery_cases c join stays s on s.id = c.stay_id
-         where s.property_id = $1 and c.source = 'guest_text' and c.opened_at >= w.start and c.opened_at < w.start + interval '1 week') as from_texts,
+         where s.property_id = $1 and c.kind = 'complaint' and c.source = 'guest_text' and c.opened_at >= w.start and c.opened_at < w.start + interval '1 week') as from_texts,
        (select count(*)::int from recovery_cases c join stays s on s.id = c.stay_id
-         where s.property_id = $1 and c.resolved_at is not null and c.opened_at >= w.start and c.opened_at < w.start + interval '1 week') as resolved,
+         where s.property_id = $1 and c.kind = 'complaint' and c.resolved_at is not null and c.opened_at >= w.start and c.opened_at < w.start + interval '1 week') as resolved,
        (select round((percentile_cont(0.5) within group (order by extract(epoch from c.resolved_at - c.opened_at) / 60))::numeric)::float
           from recovery_cases c join stays s on s.id = c.stay_id
-         where s.property_id = $1 and c.resolved_at is not null and c.opened_at >= w.start and c.opened_at < w.start + interval '1 week') as median_fix_min,
+         where s.property_id = $1 and c.kind = 'complaint' and c.resolved_at is not null and c.opened_at >= w.start and c.opened_at < w.start + interval '1 week') as median_fix_min,
        (select count(*)::int from recovery_cases c join stays s on s.id = c.stay_id
-         where s.property_id = $1 and c.reopened_count > 0 and c.opened_at >= w.start and c.opened_at < w.start + interval '1 week') as reopened,
+         where s.property_id = $1 and c.kind = 'complaint' and c.reopened_count > 0 and c.opened_at >= w.start and c.opened_at < w.start + interval '1 week') as reopened,
        (select count(*)::int from messages m where m.property_id = $1 and m.kind = 'mid_stay'
          and m.created_at >= w.start and m.created_at < w.start + interval '1 week') as midstay,
        (select count(*)::int from messages m where m.property_id = $1 and m.kind = 'mid_stay'
          and m.created_at >= w.start and m.created_at < w.start + interval '1 week'
-         and exists (select 1 from messages i where i.stay_id = m.stay_id and i.direction = 'in'
+         and exists (select 1 from messages i where i.in_reply_to = m.id and i.direction = 'in' and i.classification is not null
                        and i.created_at > m.created_at and i.created_at < m.created_at + interval '24 hours')) as midstay_replies
      from w order by w.start desc`,
     [propertyId, now.toISOString(), weeks],
@@ -90,7 +93,15 @@ export async function metricsPage(db: Db, now: Date) {
         )}
         ${statBox("Review requests, 8 weeks", String(sum("requests")))} ${statBox("Issues caught in stay, 8 weeks", String(sum("issues")))}
       </div>
-      ${first ? html`<p class="muted">Baseline taken ${first.day}.</p>` : ""}
+      ${first ? html`<p class="muted small">Baseline taken ${first.day}.</p>` : ""}
+      <div class="charts">
+        ${barChart("Review requests", "requests sent", weeks, (w) => w.requests)}
+        ${barChart("New Google reviews", "new reviews", weeks, (w) => w.reviews)}
+        ${barChart("Issues caught", "issues", weeks, (w) => w.issues)}
+        ${barChart("Median time to fix", "min", weeks, (w) => w.median_fix_min, "min")}
+      </div>
+      <details class="table-details">
+      <summary>Weekly table</summary>
       <div class="table-wrap">
         <table>
           <tr>
@@ -107,14 +118,81 @@ export async function metricsPage(db: Db, now: Date) {
           )}
         </table>
       </div>
+      </details>
     `);
   }
-  return layout(
-    "Pilot metrics",
-    html`<p class="muted">
-        Google totals come from the platform each sync; the first day recorded is the baseline. Times are medians. Reply time is
-        from review posted to reply posted.
-      </p>
-      ${sections}`,
-  );
+  return layout("Pilot metrics", html`${sections}<div class="chart-tip" id="chart-tip" role="tooltip" hidden></div>
+    <script>${raw(CHART_JS)}</script>`, {
+    active: "/metrics",
+    lede: "Google totals come from the platform each sync; the first day recorded is the baseline. Times are medians. Reply time is from review posted to reply posted.",
+  });
 }
+
+/**
+ * One measure per chart, eight weeks oldest to newest: a single series, so no legend (the title
+ * names it) and one axis. Thin bars with a 2px gap and rounded tops, a recessive baseline, the
+ * peak value as the only y label, and a tooltip on every bar. The weekly table is the text view.
+ */
+function barChart(title: string, unitLabel: string, weeksDesc: WeekRow[], value: (w: WeekRow) => number | null, unit = "") {
+  const weeks = [...weeksDesc].reverse();
+  const vals = weeks.map((w) => {
+    const v = value(w);
+    return v == null ? null : Number(v);
+  });
+  if (vals.every((v) => v == null)) {
+    return html`<figure class="chart">
+      <figcaption><span>${title}</span><b>–</b><small>this week</small></figcaption>
+      <p class="chart-empty">No data yet</p>
+    </figure>`;
+  }
+  const max = Math.max(1, ...vals.map((v) => v ?? 0));
+  const W = 320, H = 120, top = 14, base = H - 20, gap = 2;
+  const bw = (W - gap * (weeks.length - 1)) / weeks.length;
+  const latest = vals.at(-1);
+  const bars = weeks
+    .map((w, i) => {
+      const v = vals[i];
+      const x = i * (bw + gap);
+      const tip = `${w.week}: ${v == null ? "no data" : `${v} ${unitLabel}`}`;
+      if (v == null || v === 0) {
+        return `<rect class="hit" x="${x}" y="${top}" width="${bw}" height="${base - top}" data-tip="${tip}"/>` +
+          (v === 0 ? `<rect class="zero" x="${x}" y="${base - 1.5}" width="${bw}" height="1.5"/>` : "");
+      }
+      const h = Math.max(2, ((base - top) * v) / max);
+      const y = base - h;
+      const r = Math.min(4, bw / 2, h);
+      const d = `M${x},${base}V${y + r}Q${x},${y} ${x + r},${y}H${x + bw - r}Q${x + bw},${y} ${x + bw},${y + r}V${base}Z`;
+      return `<g data-tip="${tip}"><rect class="hit" x="${x}" y="${top}" width="${bw}" height="${base - top}"/><path class="bar" d="${d}"/></g>`;
+    })
+    .join("");
+  const svg = `<svg viewBox="0 0 ${W} ${H}" role="img" aria-label="${title} by week">
+    <line class="axis" x1="0" x2="${W}" y1="${base}" y2="${base}"/>
+    <text class="tick" x="0" y="9">${max}${unit ? ` ${unit}` : ""}</text>
+    ${bars}
+    <text class="tick" x="0" y="${H - 4}">${weeks[0]?.week ?? ""}</text>
+    <text class="tick" x="${W}" y="${H - 4}" text-anchor="end">${weeks.at(-1)?.week ?? ""}</text>
+  </svg>`;
+  return html`<figure class="chart">
+    <figcaption><span>${title}</span><b>${latest == null ? "–" : `${latest}${unit ? ` ${unit}` : ""}`}</b><small>this week</small></figcaption>
+    ${raw(svg)}
+  </figure>`;
+}
+
+const CHART_JS = `
+(function () {
+  var tip = document.getElementById("chart-tip");
+  if (!tip) return;
+  document.querySelectorAll(".chart [data-tip]").forEach(function (el) {
+    el.addEventListener("mouseenter", function (e) {
+      tip.textContent = el.getAttribute("data-tip");
+      tip.hidden = false;
+      el.classList.add("on");
+    });
+    el.addEventListener("mousemove", function (e) {
+      tip.style.left = e.clientX + "px";
+      tip.style.top = e.clientY - 12 + "px";
+    });
+    el.addEventListener("mouseleave", function () { tip.hidden = true; el.classList.remove("on"); });
+  });
+})();
+`;

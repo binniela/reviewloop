@@ -4,13 +4,16 @@
   "description": "Review requests, reply drafting, and service recovery for independent hotels on ASI",
   "scripts": {
     "dev": "tsx watch src/server.ts",
+    "dev:demo": "REVIEWLOOP_DEMO=1 PORT=${PORT:-3017} tsx watch src/server.ts",
     "start": "tsx src/server.ts",
     "test": "vitest run",
     "typecheck": "tsc --noEmit",
     "migrate": "tsx scripts/migrate.ts",
     "ingest": "tsx scripts/ingest.ts",
     "demo": "tsx scripts/demo.ts",
-    "properties": "tsx scripts/properties.ts"
+    "properties": "tsx scripts/properties.ts",
+    "icons": "tsx scripts/icons.ts",
+    "extension:zip": "mkdir -p dist && cd extension && zip -qr ../dist/reviewloop-extension.zip . -x '.*' && echo dist/reviewloop-extension.zip"
   },
   "license": "ISC",
   "dependencies": {

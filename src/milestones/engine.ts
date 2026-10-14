@@ -1,3 +1,4 @@
+import { DeliveryUncertainError } from "../messaging.js";
 import { DateTime } from "luxon";
 import type { Db } from "../db.js";
 import type { Messenger } from "../messaging.js";
@@ -119,9 +120,14 @@ export async function runDueJobs(db: Db, deps: RunDeps): Promise<RunSummary> {
   const now = deps.now?.() ?? new Date();
   const summary: RunSummary = { done: 0, skipped: 0, deferred: 0, failed: 0, retrying: 0 };
 
+  // After a crash the provider may already have accepted a message. Surface the uncertain
+  // outcome for reconciliation instead of leaving it running forever or blindly resending.
+  await db.query(`update jobs set status = 'failed', result = 'Worker interrupted; provider outcome unknown. Reconcile before retrying.', updated_at = $1
+    where status = 'running' and updated_at < $1::timestamptz - interval '15 minutes'`, [now.toISOString()]);
+
   // Claim due jobs so overlapping cron runs don't double-send.
   const jobs = await db.query<{ id: string; stay_id: string; kind: string; attempts: number }>(
-    `update jobs set status = 'running', attempts = attempts + 1, updated_at = now()
+    `update jobs set status = 'running', attempts = attempts + 1, updated_at = $1
       where id in (select id from jobs where status = 'pending' and run_at <= $1
                    order by run_at limit $2 for update skip locked)
       returning id::text, stay_id::text, kind, attempts`,
@@ -137,7 +143,7 @@ export async function runDueJobs(db: Db, deps: RunDeps): Promise<RunSummary> {
         : { status: "skipped", result: `no handler for ${job.kind}` };
     } catch (err) {
       const message = (err as Error).message;
-      if (job.attempts >= MAX_ATTEMPTS) {
+      if (err instanceof DeliveryUncertainError || job.attempts >= MAX_ATTEMPTS) {
         await finish(db, job.id, "failed", message);
         summary.failed++;
       } else {

@@ -1,0 +1,44 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Reviewloop</title>
+    <link rel="stylesheet" href="popup.css" />
+  </head>
+  <body>
+    <header>
+      <svg viewBox="0 0 32 32" aria-hidden="true"><path d="M16.9 8.1A8 8 0 1 0 24 15.4" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" /><circle cx="23.2" cy="8.8" r="1.7" fill="currentColor" /></svg>
+      reviewloop
+    </header>
+
+    <section id="setup" hidden>
+      <h1>Connect to your hotel.</h1>
+      <p>Enter the Reviewloop address your manager gave you.</p>
+      <form id="setup-form">
+        <input id="url" placeholder="reviewloop.yourhotel.com" required />
+        <p class="err" id="err"></p>
+        <button type="submit">Connect</button>
+      </form>
+    </section>
+
+    <section id="status" hidden>
+      <div class="stats">
+        <a class="stat" data-go="/issues"><b id="unacked">–</b>Nobody on it</a>
+        <a class="stat" data-go="/issues"><b id="urgent">–</b>Urgent</a>
+        <a class="stat" data-go="/"><b id="awaiting">–</b>Replies waiting</a>
+      </div>
+      <p class="latest" id="latest" hidden></p>
+      <p class="note" id="note" hidden></p>
+      <div class="actions">
+        <button type="button" data-go="/issues" id="primary">Open guest issues</button>
+        <button type="button" class="secondary" data-go="/">Review replies</button>
+      </div>
+    </section>
+
+    <footer id="foot" hidden>
+      <span id="host"></span>
+      <button type="button" class="link" id="change">Change</button>
+    </footer>
+    <script type="module" src="popup.js"></script>
+  </body>
+</html>

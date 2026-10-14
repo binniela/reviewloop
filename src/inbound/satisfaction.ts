@@ -15,7 +15,7 @@ export async function updateSatisfaction(db: Db, stayId: string): Promise<number
        from messages where stay_id = $1 and direction = 'in' and classification is not null
      union all
      select ((case when resolved_at is null then -1 else -0.25 end) - 0.5 * reopened_count)::float, coalesce(resolved_at, opened_at)
-       from recovery_cases where stay_id = $1`,
+       from recovery_cases where stay_id = $1 and kind = 'complaint'`,
     [stayId],
   );
   if (!rows.length) return null;

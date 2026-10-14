@@ -55,7 +55,7 @@ export async function sendReviewRequest(db: Db, stayId: string, messenger: Messe
     : scheduledCheckout(property, stay.departure_date);
   if (now.diff(checkout, "days").days > MAX_LATE_DAYS) return { status: "skipped", result: "too long after checkout" };
 
-  const [openCase] = await db.query("select id from recovery_cases where stay_id = $1 and resolved_at is null", [stayId]);
+  const [openCase] = await db.query("select id from recovery_cases where stay_id = $1 and resolved_at is null and kind = 'complaint'", [stayId]);
   const holdUntil = checkout.plus({ hours: RECOVERY_HOLD_HOURS });
   if (openCase && now < holdUntil) {
     const next = DateTime.min(now.plus({ minutes: RECHECK_MINUTES }), holdUntil);

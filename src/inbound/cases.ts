@@ -1,3 +1,4 @@
+import { DeliveryUncertainError } from "../messaging.js";
 import type { Db } from "../db.js";
 import { alertStaff, canTextGuest, guestVars, loadContact, renderTemplate, sendAndLog, staffUrl } from "../guest.js";
 import type { Messenger } from "../messaging.js";
@@ -20,7 +21,7 @@ export async function resolveCase(db: Db, caseId: string, resolution: string | n
   const [c] = await db.query<{ stay_id: string }>(
     `update recovery_cases set resolved_at = $2, resolution = $3,
             acknowledged_at = coalesce(acknowledged_at, $2), acknowledged_by = coalesce(acknowledged_by, $4),
-            followup_due_at = $5
+            followup_due_at = $5, followup_sent_at = null, followup_claimed_at = null, followup_error = null, guest_confirmed_at = null
       where id = $1 and resolved_at is null returning stay_id::text`,
     [caseId, now.toISOString(), resolution, by, new Date(now.getTime() + FOLLOWUP_DELAY_MIN * 60_000).toISOString()],
   );
@@ -37,7 +38,11 @@ export async function replyToGuest(db: Db, messenger: Messenger, caseId: string,
   );
   if (!c) throw new Error("issue not found");
   const contact = (await loadContact(db, c.stay_id))!;
-  const texted = await guestHasTexted(db, c.stay_id);
+  const [inbound] = await db.query<{ from_addr: string }>(
+    "select from_addr from messages where case_id = $1 and direction = 'in' order by created_at desc, id desc limit 1", [caseId],
+  );
+  if (inbound) contact.phone = inbound.from_addr;
+  const texted = !!inbound;
   const perm = await canTextGuest(db, contact, texted);
   if (!perm.ok) throw new Error(`can't text this guest: ${perm.reason}`);
   const property = await getProperty(db, c.property_id);
@@ -61,26 +66,41 @@ export async function runCaseTimers(db: Db, messenger: Messenger, nowDate: Date)
   const now = nowDate.toISOString();
 
   // Nobody at the desk responded in time: tell the GM (or re-alert the desk if there's no GM phone).
-  const stale = await db.query<{ id: string; stay_id: string; property_id: string; summary: string; name: string; room: string | null; minutes: number }>(
+  const stale = await db.query<{ id: string; stay_id: string; property_id: string; summary: string; name: string; room: string | null; minutes: number; reopened_count: number }>(
     `select c.id::text, c.stay_id::text, s.property_id, c.summary,
-            concat_ws(' ', s.guest_first_name, s.guest_last_name) as name, s.room, p.escalation_minutes as minutes
+            concat_ws(' ', s.guest_first_name, s.guest_last_name) as name, s.room, p.escalation_minutes as minutes, c.reopened_count
        from recovery_cases c join stays s on s.id = c.stay_id join properties p on p.id = s.property_id
       where c.resolved_at is null and c.acknowledged_at is null and c.escalated_at is null and c.alerted_at is not null
+        and (c.escalation_next_attempt_at is null or c.escalation_next_attempt_at <= $1::timestamptz)
         and c.alerted_at + make_interval(mins => p.escalation_minutes) <= $1::timestamptz`,
     [now],
   );
   for (const c of stale) {
+    const claimed = await db.query(
+      `update recovery_cases set escalation_next_attempt_at = $2
+       where id = $1 and escalated_at is null and resolved_at is null and acknowledged_at is null
+         and (escalation_next_attempt_at is null or escalation_next_attempt_at <= $3) returning id`,
+      [c.id, new Date(nowDate.getTime() + 5 * 60_000).toISOString(), now],
+    );
+    if (!claimed.length) continue;
     const property = await getProperty(db, c.property_id);
     const text = `No one has responded in ${c.minutes} min: ${c.name || "Guest"}, room ${c.room ?? "?"}: ${c.summary}\n${staffUrl("/issues")}`;
     try {
-      await alertStaff(db, messenger, property, text, { caseId: c.id, stayId: c.stay_id, onlyGm: !!property.gm_phone, at: nowDate });
+      await alertStaff(db, messenger, property, text, { caseId: c.id, stayId: c.stay_id, onlyGm: !!property.gm_phone, at: nowDate, dedupeKey: `escalation:${c.id}:${c.reopened_count}` });
+      await db.query("update recovery_cases set escalated_at = $2, escalation_error = null, escalation_next_attempt_at = null where id = $1", [c.id, now]);
       summary.escalated++;
     } catch (err) {
       summary.errors.push(`escalate case ${c.id}: ${(err as Error).message}`);
+      await db.query("update recovery_cases set escalation_error = $2, escalation_next_attempt_at = $3 where id = $1",
+        [c.id, (err as Error).message, err instanceof DeliveryUncertainError ? "infinity" : new Date(nowDate.getTime() + 5 * 60_000).toISOString()]);
     }
-    // Mark even on failure so we don't spam every tick; the case stays visible on the issues page.
-    await db.query("update recovery_cases set escalated_at = $2 where id = $1", [c.id, now]);
+
   }
+
+  // A crashed sender may have reached the provider; do not blindly resend its follow-up.
+  await db.query(`update recovery_cases set followup_due_at = null,
+    followup_error = 'Worker interrupted; delivery outcome unknown. Reconcile with provider.'
+    where followup_claimed_at < $1::timestamptz - interval '10 minutes' and followup_sent_at is null`, [now]);
 
   // "Is everything better now?" after a fix.
   const due = await db.query<{ id: string; stay_id: string; property_id: string; status: string }>(
@@ -112,6 +132,11 @@ export async function runCaseTimers(db: Db, messenger: Messenger, nowDate: Date)
       await db.query("update recovery_cases set followup_due_at = $2 where id = $1", [c.id, quiet.toISO()]);
       continue;
     }
+    const claimed = await db.query(
+      `update recovery_cases set followup_claimed_at = $2 where id = $1 and resolved_at is not null
+        and followup_sent_at is null and followup_claimed_at is null and followup_due_at <= $2 returning id`, [c.id, now],
+    );
+    if (!claimed.length) continue;
     try {
       await sendAndLog(db, messenger, {
         property,
@@ -123,10 +148,16 @@ export async function runCaseTimers(db: Db, messenger: Messenger, nowDate: Date)
         caseId: c.id,
         at: nowDate,
       });
-      await db.query("update recovery_cases set followup_sent_at = $2 where id = $1", [c.id, now]);
+      await db.query("update recovery_cases set followup_sent_at = $2, followup_error = null where id = $1", [c.id, now]);
       summary.followupsSent++;
     } catch (err) {
       summary.errors.push(`followup case ${c.id}: ${(err as Error).message}`);
+      if (err instanceof DeliveryUncertainError) {
+        await db.query("update recovery_cases set followup_due_at = null, followup_error = $2 where id = $1", [c.id, (err as Error).message]);
+      } else {
+        await db.query("update recovery_cases set followup_claimed_at = null, followup_due_at = $2, followup_error = $3 where id = $1",
+          [c.id, new Date(nowDate.getTime() + 5 * 60_000).toISOString(), (err as Error).message]);
+      }
     }
   }
   return summary;

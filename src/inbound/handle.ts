@@ -1,3 +1,4 @@
+import { deferredMessenger, dispatchOutbox } from "../outbox.js";
 import type { Db } from "../db.js";
 import { alertStaff, guestVars, loadContact, renderTemplate, sendAndLog, staffUrl } from "../guest.js";
 import { normalizePhone } from "../ingest/asiReport.js";
@@ -13,7 +14,7 @@ import { updateSatisfaction } from "./satisfaction.js";
  */
 
 const STOP = new Set(["stop", "stopall", "unsubscribe", "cancel", "end", "quit", "optout", "revoke"]);
-const START = new Set(["start", "unstop", "yes"]);
+const START = new Set(["start", "unstop"]);
 
 export interface InboundSms {
   from: string;
@@ -37,11 +38,38 @@ export type InboundOutcome =
   | { action: "request_forwarded" | "unmatched_forwarded"; classification: Classification };
 
 export async function handleInbound(db: Db, deps: InboundDeps, sms: InboundSms): Promise<InboundOutcome> {
+  // Model calls run before locking the property so a slow classifier cannot block STOP
+  // processing or other guests. The transaction rechecks deduplication and current case state.
+  let classifier = deps.classifier;
+  const keyword = sms.body.trim().toLowerCase().replace(/[^a-z]/g, "");
+  const property = await propertyForNumber(db, sms.to);
+  if (!property) return { action: "unknown_property" };
+  if (!STOP.has(keyword) && !START.has(keyword) && !(await db.query("select 1 from messages where provider_id = $1", [sms.providerId])).length) {
+    const from = normalizePhone(sms.from) ?? sms.from;
+    const stay = await matchStay(db, property.id, from, deps.now?.() ?? new Date());
+    const [last] = await db.query<{ body: string }>(
+      "select body from messages where property_id = $1 and stay_id = $2 and to_addr = $3 and direction = 'out' and kind <> 'alert' order by created_at desc, id desc limit 1", [property.id, stay, from],
+    );
+    const classification = await deps.classifier.classify(sms.body, { lastOutbound: last?.body ?? null });
+    classifier = { classify: async () => classification };
+  }
+  // Persist the incoming message, case changes, and outgoing work together. No provider sends inside
+  // the transaction: a retry can never mistake partially processed input for completed work.
+  const outcome = await db.transaction(async (tx) => {
+    await tx.query("select id from properties where sms_from = $1 for update", [normalizePhone(sms.to) ?? sms.to]);
+    return processInbound(tx, { ...deps, classifier, messenger: deferredMessenger }, sms);
+  });
+  await dispatchOutbox(db, deps.messenger, deps.now?.() ?? new Date());
+  return outcome;
+}
+
+async function processInbound(db: Db, deps: InboundDeps, sms: InboundSms): Promise<InboundOutcome> {
   const now = deps.now?.() ?? new Date();
   const from = normalizePhone(sms.from) ?? sms.from;
   const property = await propertyForNumber(db, sms.to);
   if (!property) return { action: "unknown_property" };
 
+  if ((await db.query("select 1 from messages where provider_id = $1", [sms.providerId])).length) return { action: "duplicate" };
   const keyword = sms.body.trim().toLowerCase().replace(/[^a-z]/g, "");
   if (STOP.has(keyword) || START.has(keyword)) {
     const logged = await logInbound(db, property, null, from, sms, null, now);
@@ -56,18 +84,19 @@ export async function handleInbound(db: Db, deps: InboundDeps, sms: InboundSms):
   }
 
   const stayId = await matchStay(db, property.id, from, now);
-  const lastOutbound = await db.query<{ body: string }>(
-    "select body from messages where direction = 'out' and to_addr = $1 and kind <> 'alert' order by created_at desc limit 1",
-    [from],
+  const lastOutbound = await db.query<{ id: string; body: string; kind: string; case_id: string | null }>(
+    "select id::text, body, kind, case_id::text from messages where direction = 'out' and to_addr = $1 and property_id = $2 and kind <> 'alert' and stay_id = $3 order by created_at desc, id desc limit 1",
+    [from, property.id, stayId],
   );
   const classification = await deps.classifier.classify(sms.body, { lastOutbound: lastOutbound[0]?.body ?? null });
   const messageId = await logInbound(db, property, stayId, from, sms, classification, now);
   if (!messageId) return { action: "duplicate" };
+  if (lastOutbound[0]) await db.query("update messages set in_reply_to = $2 where id = $1", [messageId, lastOutbound[0].id]);
 
   if (!stayId) {
     // Can't tie it to a guest (texted from another phone, report not uploaded yet). Still a person
     // reaching out to the hotel, so the desk sees it.
-    if (isComplaint(classification) || isRequest(classification)) {
+    if (isComplaint(classification) || isRequest(classification) || classification.category !== "praise") {
       await alertStaff(db, deps.messenger, property, `Text from ${from} (no matching guest): "${sms.body.trim()}"\n${staffUrl("/issues")}`, {
         includeGm: classification.urgency === "urgent",
         at: now,
@@ -78,6 +107,8 @@ export async function handleInbound(db: Db, deps: InboundDeps, sms: InboundSms):
   }
 
   const contact = (await loadContact(db, stayId))!;
+  // Replies belong to the verified inbound sender, not a different phone on the stay.
+  contact.phone = from;
   const who = `${[contact.firstName, contact.lastName].filter(Boolean).join(" ") || "Guest"}, room ${contact.room ?? "?"}`;
   let outcome: InboundOutcome;
 
@@ -95,6 +126,7 @@ export async function handleInbound(db: Db, deps: InboundDeps, sms: InboundSms):
 
   if (open) {
     // Anything they send while an issue is open goes to the desk, so nothing gets lost.
+    if (isComplaint(classification)) await db.query("update recovery_cases set kind = 'complaint', summary = $2, category = $3 where id = $1 and kind = 'request'", [open.id, classification.summary, classification.category]);
     await db.query("update messages set case_id = $2 where id = $1", [messageId, open.id]);
     if (classification.urgency === "urgent") await db.query("update recovery_cases set urgency = 'urgent' where id = $1", [open.id]);
     await alertStaff(db, deps.messenger, property, `Update from ${who}: "${sms.body.trim()}"\n${staffUrl("/issues")}`, {
@@ -108,7 +140,7 @@ export async function handleInbound(db: Db, deps: InboundDeps, sms: InboundSms):
     // They answered our "is everything better?" with "no".
     await db.query(
       `update recovery_cases set resolved_at = null, reopened_count = reopened_count + 1, followup_due_at = null,
-              followup_sent_at = null, acknowledged_at = null, acknowledged_by = null, escalated_at = null, alerted_at = $2,
+              followup_sent_at = null, followup_claimed_at = null, followup_error = null, acknowledged_at = null, acknowledged_by = null, escalated_at = null, escalation_error = null, escalation_next_attempt_at = null, guest_confirmed_at = null, alerted_at = $2,
               urgency = case when $3 = 'urgent' then 'urgent' else urgency end
         where id = $1`,
       [recent.id, now.toISOString(), classification.urgency],
@@ -122,27 +154,27 @@ export async function handleInbound(db: Db, deps: InboundDeps, sms: InboundSms):
     });
     await acknowledge(db, deps.messenger, property, contact, stayId, recent.id, property.ack_template, now);
     outcome = { action: "case_reopened", caseId: recent.id, classification };
-  } else if (isComplaint(classification)) {
+  } else if (isComplaint(classification) || isRequest(classification) || classification.category !== "praise") {
+    const complaint = isComplaint(classification);
     const [c] = await db.query<{ id: string }>(
-      `insert into recovery_cases (stay_id, summary, source, category, urgency, opened_at, alerted_at)
-       values ($1, $2, 'guest_text', $3, $4, $5, $5) returning id::text`,
-      [stayId, classification.summary, classification.category, classification.urgency, now.toISOString()],
+      `insert into recovery_cases (stay_id, summary, source, category, urgency, opened_at, alerted_at, kind)
+       values ($1, $2, 'guest_text', $3, $4, $5, $5, $6) returning id::text`,
+      [stayId, classification.summary, classification.category, classification.urgency, now.toISOString(), complaint ? "complaint" : "request"],
     );
     await db.query("update messages set case_id = $2 where id = $1", [messageId, c!.id]);
-    const tag = classification.urgency === "urgent" ? "URGENT " : "";
+    const tag = classification.urgency === "urgent" ? "URGENT " : complaint ? "" : "Request from ";
     await alertStaff(db, deps.messenger, property, `${tag}${who}: "${sms.body.trim()}"\nReply or resolve: ${staffUrl("/issues")}`, {
       caseId: c!.id,
       stayId,
       includeGm: classification.urgency === "urgent",
       at: now,
     });
-    await acknowledge(db, deps.messenger, property, contact, stayId, c!.id, property.ack_template, now);
+    await acknowledge(db, deps.messenger, property, contact, stayId, c!.id, complaint ? property.ack_template : property.request_ack_template, now);
     outcome = { action: "case_opened", caseId: c!.id, classification };
-  } else if (isRequest(classification)) {
-    await alertStaff(db, deps.messenger, property, `Request from ${who}: "${sms.body.trim()}"\n${staffUrl("/issues")}`, { stayId, at: now });
-    await acknowledge(db, deps.messenger, property, contact, stayId, null, property.request_ack_template, now);
-    outcome = { action: "request_forwarded", classification };
   } else {
+    if (recent && classification.sentiment === "positive" && lastOutbound[0]?.kind === "followup" && lastOutbound[0].case_id === recent.id) {
+      await db.query("update recovery_cases set guest_confirmed_at = $2 where id = $1", [recent.id, now.toISOString()]);
+    }
     outcome = { action: "no_action", classification };
   }
 
@@ -183,7 +215,7 @@ async function acknowledge(
 async function propertyForNumber(db: Db, to: string): Promise<Property | null> {
   const num = normalizePhone(to) ?? to;
   const props = await listProperties(db);
-  return props.find((p) => p.sms_from === num) ?? (props.length === 1 ? props[0]! : null);
+  return props.find((p) => p.sms_from === num) ?? null;
 }
 
 /** The guest this phone belongs to: in house now, else checked out in the last 3 days, else arriving within 2. */

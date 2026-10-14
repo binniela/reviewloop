@@ -1,0 +1,6 @@
+.data
+.env
+.env.local
+desktop
+extension
+tests

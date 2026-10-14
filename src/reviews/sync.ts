@@ -86,8 +86,13 @@ export async function syncReviews(db: Db, propertyId: string, deps: SyncDeps): P
   for (const review of pending) {
     try {
       const stayId = await matchStay(db, property, review.author, new Date(review.reviewed_at));
-      if (stayId) await db.query("update reviews set stay_id = $2 where id = $1", [review.id, stayId]);
-      const stayNotes = stayId ? await recoveryNotes(db, stayId) : [];
+      if (stayId) await db.query("update reviews set stay_id = $2 where id = $1 and stay_verified_at is null", [review.id, stayId]);
+      // A unique name/date match is still only a guess. Never send private stay data to
+      // the model unless staff explicitly verified the review-to-stay association.
+      const [verified] = await db.query<{ stay_id: string }>(
+        "select stay_id::text from reviews where id = $1 and stay_verified_at is not null", [review.id],
+      );
+      const stayNotes = verified?.stay_id ? await recoveryNotes(db, verified.stay_id) : [];
       const voiceExamples = await recentEdits(db, property.id);
       const draft = await deps.drafter.draft({ property, review, stayNotes, voiceExamples });
 

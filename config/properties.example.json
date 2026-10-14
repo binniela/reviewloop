@@ -7,7 +7,7 @@
     "review_delay_min": 120,
     "google_place_id": "REPLACE_WITH_PLACE_ID",
     "google_location": "accounts/REPLACE/locations/REPLACE",
-    "reply_mode": "auto_high",
+    "reply_mode": "approval_all",
     "voice_notes": "Family-run, warm and plain-spoken. Short replies. Mention the owner by first name only in the sign-off.",
     "signoff": "Raj, General Manager",
     "request_template": "Hi {first_name}, thanks for staying with us at {property_name}! If you have a minute, a quick Google review helps a small hotel like ours a lot: {review_link}",
