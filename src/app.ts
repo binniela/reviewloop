@@ -29,6 +29,7 @@ import { operationsPage, problemCounts, reportFreshness } from "./web/operations
 import { answer, topicFor, type Topic } from "./web/ask.js";
 import { checkinDone, checkinForm, qrSign } from "./web/public.js";
 import { rateLimited, sameOrigin } from "./security.js";
+import { runRetentionIfDue } from "./retention.js";
 
 export interface AppDeps {
   db: Db;
@@ -590,6 +591,7 @@ export function createApp(deps: AppDeps) {
 /** One scheduler pass: apply events, send due messages, escalations and follow-ups, sync reviews. */
 export async function tick(deps: AppDeps) {
   const now = deps.now?.() ?? new Date();
+  await runRetentionIfDue(deps.db, now, Number(process.env.PII_RETENTION_DAYS ?? 365));
   const outbound = await dispatchOutbox(deps.db, deps.messenger, now);
   const events = await processEvents(deps.db);
   const jobs = await runDueJobs(deps.db, { messenger: deps.messenger, now: () => now });

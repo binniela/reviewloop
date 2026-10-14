@@ -112,7 +112,16 @@ guidance. Conduit does filter unhappy guests out, permanently; this is the compl
 
 **Texting rules.** Marketing-style texts (welcome, mid-stay, review request) need consent: the
 PMS opt-in column or a staff-verified QR check-in request. A guest who texts us first gets replies to that
-conversation. STOP blocks everything until START. No texts 8 PM to 9 AM local.
+conversation. STOP blocks guest texts until START. Scheduled guest texts (welcome, mid-stay,
+review request, and follow-up) wait until after quiet hours, 8 PM to 9 AM local. Replies to a
+guest who contacted the desk and staff alerts can be sent immediately, including overnight.
+
+**Guest data retention.** The daily scheduler redacts names, contact details, room, message
+bodies, case notes, and review-request destinations for departed or cancelled stays after
+365 days by default (`PII_RETENTION_DAYS`, minimum 30). Unmatched messages are redacted on
+the same schedule; unlinked check-in sign-ups are deleted after 2 days. STOP suppression
+numbers remain so opt-outs continue to work. External log and backup retention must be set
+separately with the hosting provider.
 
 **Triage.** Claude (Haiku by default) labels each text with sentiment, category, urgency and a
 one-line summary. Keyword rules are the fallback when there's no API key or the API fails, and unrecognized messages remain actionable requests for staff. Safety words (smoke, gas, leak, injury, police...) are always urgent,
