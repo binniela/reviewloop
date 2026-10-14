@@ -139,7 +139,8 @@ export function createApp(deps: AppDeps) {
       });
     } catch (err) {
       // A 500 makes Twilio retry; the MessageSid dedupe makes that safe.
-      console.error("inbound sms failed", err);
+      // Provider errors may echo message content or phone numbers; keep raw details out of logs.
+      console.error("inbound sms failed", err instanceof Error ? err.name : "unknown error");
       return c.text("error", 500);
     }
     return c.body("<Response></Response>", 200, { "Content-Type": "text/xml" });
