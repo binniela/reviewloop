@@ -8,6 +8,11 @@ import { messengerFromEnv } from "../src/messaging.js";
 import { drafterFromEnv } from "../src/reviews/drafter.js";
 import { reviewSourceFromEnv } from "../src/reviews/sources.js";
 
+// Load .env if present (Node 20.12+).
+try {
+  process.loadEnvFile();
+} catch {}
+
 const [propertyId, kind, file] = process.argv.slice(2);
 if (!propertyId || !file || !REPORT_KINDS.includes(kind as ReportKind)) {
   throw new Error(`usage: npm run ingest -- <propertyId> <${REPORT_KINDS.join("|")}> <file.csv>`);

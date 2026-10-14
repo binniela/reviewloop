@@ -1,59 +1,114 @@
-// End-to-end walkthrough with no credentials: in-memory database, printed messages, mock Google.
+// End-to-end walkthrough of one stay, with no credentials: in-memory database, printed
+// messages, mock Google, keyword triage (or Claude if ANTHROPIC_API_KEY is set).
 //   npm run demo
-import { tick, ingest, type AppDeps } from "../src/app.js";
+import { ingest, tick, type AppDeps } from "../src/app.js";
+import { recordConsent } from "../src/consent.js";
 import { migrate, openPglite } from "../src/db.js";
+import { classifierFromEnv } from "../src/inbound/classify.js";
+import { resolveCase } from "../src/inbound/cases.js";
+import { handleInbound } from "../src/inbound/handle.js";
 import { ConsoleMessenger } from "../src/messaging.js";
 import { drafterFromEnv } from "../src/reviews/drafter.js";
 import { MockReviewSource } from "../src/reviews/sources.js";
 
-let clock = new Date("2026-10-13T15:00:00Z"); // 8:00 AM Pacific
+try {
+  process.loadEnvFile();
+} catch {}
+
+let clock = new Date("2026-10-11T22:30:00Z"); // Sun 3:30 PM Pacific
 const db = await openPglite();
 await migrate(db);
 await db.query(
-  `insert into properties (id, name, google_place_id, google_location, voice_notes, signoff)
+  `insert into properties (id, name, google_place_id, google_location, voice_notes, signoff,
+                           sms_from, desk_phones, gm_phone)
    values ('sunset', 'Sunset Inn', 'ChIJdemo', 'accounts/1/locations/2',
-           'Family-run motel off the 10. Warm, plain-spoken, short.', 'Raj, General Manager')`,
+           'Family-run motel off the 10. Warm, plain-spoken, short.', 'Raj, General Manager',
+           '+16265550000', '{+16265559001}', '+16265559002')`,
 );
 const source = new MockReviewSource({ sunset: [] });
-const messenger = new ConsoleMessenger();
-const deps: AppDeps = { db, messenger, source, drafter: drafterFromEnv(), now: () => clock };
-const step = (s: string) => console.log(`\n=== ${s} (${clock.toLocaleString("en-US", { timeZone: "America/Los_Angeles" })} PT)`);
+source.baseline.sunset = { count: 212, sum: 212 * 3.8 };
+const messenger = new ConsoleMessenger(true);
+const classifier = classifierFromEnv();
+const deps: AppDeps = { db, messenger, source, drafter: drafterFromEnv(), classifier, now: () => clock };
 
-step("Front desk uploads this morning's in-house report");
-const inHouse = `Confirmation,Guest Name,Email,Phone,SMS Opt In,Room,Arrival,Departure,Status
-20001,"PATEL, ANITA",anita@example.com,626-555-0101,Y,104,10/11/2026,10/13/2026,In House
-20002,"LEE, MARCUS",marcus@example.com,626-555-0102,N,210,10/12/2026,10/13/2026,In House
-20003,"GOMEZ, ANA",ana@example.com,626-555-0103,Y,118,10/12/2026,10/14/2026,In House`;
-console.log(await ingest(deps, "sunset", "in_house", inHouse));
+const WHO: Record<string, string> = { "+16265559001": "FRONT DESK", "+16265559002": "GM", "+16265550101": "Anita (guest)" };
+let shown = 0;
+const flush = () => {
+  for (const m of messenger.sent.slice(shown)) {
+    const who = WHO[m.to] ?? m.to;
+    console.log(`   -> ${who}: ${m.body.replace(/\n/g, " / ")}`);
+  }
+  shown = messenger.sent.length;
+};
+const at = (iso: string, label: string) => {
+  clock = new Date(iso);
+  const t = clock.toLocaleString("en-US", { timeZone: "America/Los_Angeles", weekday: "short", hour: "numeric", minute: "2-digit" });
+  console.log(`\n[${t}] ${label}`);
+};
+let sid = 0;
+const guestTexts = async (body: string) => {
+  console.log(`   <- Anita: ${body}`);
+  const r = await handleInbound(db, { messenger, classifier, now: () => clock }, {
+    from: "+16265550101",
+    to: "+16265550000",
+    body,
+    providerId: `SMdemo${++sid}`,
+  });
+  console.log(`   (${r.action}${"classification" in r ? `: ${r.classification.sentiment}, ${r.classification.category}, ${r.classification.urgency}` : ""})`);
+  flush();
+};
+const run = async () => {
+  await tick(deps);
+  flush();
+};
 
-step("Guest in 104 texts about a loud AC; front desk logs it");
-await db.query("insert into recovery_cases (stay_id, summary) select id, 'AC unit loud overnight' from stays where confirmation = '20001'");
+at("2026-10-11T22:30:00Z", "Baseline Google snapshot is taken on the first sync");
+await run();
 
-clock = new Date("2026-10-13T19:00:00Z");
-step("Departures report after checkout");
-const departures = `Confirmation,Guest Name,Email,Phone,SMS Opt In,Room,Arrival,Departure,Status,Check Out Time
-20001,"PATEL, ANITA",anita@example.com,626-555-0101,Y,104,10/11/2026,10/13/2026,Checked Out,10:42 AM
-20002,"LEE, MARCUS",marcus@example.com,626-555-0102,N,210,10/12/2026,10/13/2026,Checked Out,11:05 AM`;
-console.log(await ingest(deps, "sunset", "departures", departures));
+at("2026-10-11T23:15:00Z", "Anita checks in for 3 nights. She scans the QR code at the desk and opts in");
+const report = (status: string, out = "") =>
+  `Confirmation,Guest Name,Email,Phone,SMS Opt In,Room,Arrival,Departure,Status,Check Out Time
+30001,"PATEL, ANITA",anita@example.com,,N,104,10/11/2026,10/14/2026,${status},${out}`;
+await ingest(deps, "sunset", "in_house", report("In House"));
+await recordConsent(db, messenger, { propertyId: "sunset", lastName: "Patel", room: "104", phone: "626-555-0101", agreed: true }, clock);
+flush();
+await run();
 
-clock = new Date("2026-10-13T20:30:00Z");
-step("Scheduler tick: Marcus gets an email (no SMS consent); Anita is held while her issue is open");
-console.log((await tick(deps)).jobs);
+at("2026-10-12T17:00:00Z", "Mid-stay check, morning after arrival");
+await run();
+await guestTexts("Room is nice but the AC is really loud and kept us up");
 
-clock = new Date("2026-10-13T21:35:00Z");
-step("Issue resolved (moved to a quiet room, comped breakfast); next tick sends Anita's request");
-await db.query("update recovery_cases set resolved_at = now(), resolution = 'Moved to room 112 and comped breakfast'");
-console.log((await tick(deps)).jobs);
+at("2026-10-12T17:21:00Z", "Nobody at the desk tapped 'I'm on it' within 20 minutes");
+await run();
 
-clock = new Date("2026-10-14T18:00:00Z");
-step("Next day: two Google reviews come in");
-source.reviews.sunset!.push(
-  { externalId: "accounts/1/locations/2/reviews/a", author: "Marcus L", rating: 5, body: "Spotless room, easy parking, friendly front desk.", reviewedAt: "2026-10-14T17:10:00Z", existingReply: null },
-  { externalId: "accounts/1/locations/2/reviews/b", author: "Anita P", rating: 3, body: "AC was noisy the first night but they moved us quickly. Breakfast was decent.", reviewedAt: "2026-10-14T17:40:00Z", existingReply: null },
+at("2026-10-12T17:40:00Z", "Desk moves her to room 112 and resolves the issue");
+const [c] = await db.query<{ id: string }>("select id::text from recovery_cases");
+await resolveCase(db, c!.id, "Moved to 112, comped breakfast", "maria", clock);
+
+at("2026-10-12T18:11:00Z", "Follow-up 30 minutes after the fix");
+await run();
+await guestTexts("Yes much better, thank you!");
+
+at("2026-10-14T17:50:00Z", "Checkout");
+await ingest(deps, "sunset", "departures", report("Checked Out", "10:50 AM"));
+at("2026-10-14T19:55:00Z", "Two hours later: review request. Everyone is asked; her issue was resolved, so nothing to hold");
+await run();
+
+at("2026-10-15T18:00:00Z", "She leaves a review the next day");
+source.reviews.sunset!.push({
+  externalId: "accounts/1/locations/2/reviews/x",
+  author: "Anita P",
+  rating: 4,
+  body: "AC was loud the first night but they moved us right away and checked back in. Friendly staff.",
+  reviewedAt: "2026-10-15T16:30:00Z",
+  existingReply: null,
+});
+await run();
+console.log("   Reply posted to Google:", JSON.stringify(source.replies.at(-1)?.text));
+
+const [s] = await db.query<{ satisfaction: number }>("select satisfaction from stays");
+const [snap] = await db.query<{ review_count: number; avg_rating: number }>(
+  "select review_count, avg_rating from review_snapshots order by day desc limit 1",
 );
-const t = await tick(deps);
-console.log(t.reviews);
-console.log("\nAuto-posted to Google:", source.replies);
-const queue = await db.query("select d.draft, r.author, r.rating from reply_drafts d join reviews r on r.id = d.review_id where d.status = 'pending'");
-console.log("Waiting for GM approval:", queue);
+console.log(`\nStay satisfaction: ${s!.satisfaction}. Google now: ${snap!.review_count} reviews, ${snap!.avg_rating} average (baseline 212, 3.8).`);
 await db.close();

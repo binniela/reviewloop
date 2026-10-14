@@ -10,6 +10,13 @@
     "reply_mode": "auto_high",
     "voice_notes": "Family-run, warm and plain-spoken. Short replies. Mention the owner by first name only in the sign-off.",
     "signoff": "Raj, General Manager",
-    "request_template": "Hi {first_name}, thanks for staying with us at {property_name}! If you have a minute, a quick Google review helps a small hotel like ours a lot: {review_link}"
+    "request_template": "Hi {first_name}, thanks for staying with us at {property_name}! If you have a minute, a quick Google review helps a small hotel like ours a lot: {review_link}",
+
+    "sms_from": "+16265550000",
+    "desk_phones": ["+16265559001"],
+    "desk_emails": ["frontdesk@sunsetinn.example"],
+    "gm_phone": "+16265559002",
+    "escalation_minutes": 20,
+    "midstay_hour": 10
   }
 ]

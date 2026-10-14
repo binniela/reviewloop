@@ -18,6 +18,17 @@ export interface Property {
   signoff: string;
   request_template: string;
   report_mapping: unknown;
+  sms_from: string | null;
+  desk_phones: string[];
+  desk_emails: string[];
+  gm_phone: string | null;
+  escalation_minutes: number;
+  midstay_hour: number;
+  welcome_template: string;
+  midstay_template: string;
+  ack_template: string;
+  request_ack_template: string;
+  followup_template: string;
 }
 
 export async function getProperty(db: Db, id: string): Promise<Property> {

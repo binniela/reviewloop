@@ -3,31 +3,44 @@ import type { Db } from "../db.js";
 import type { Messenger } from "../messaging.js";
 import { getProperty, scheduledCheckout } from "../properties.js";
 import { sendReviewRequest, type JobOutcome } from "../reviews/requests.js";
+import { midStayTime, sendMidStay, sendWelcome } from "./inStay.js";
 
 /**
  * Milestone engine. Turns stay events into scheduled jobs, then runs jobs when due.
  *
- * Phase 1 has one milestone, the post-checkout review request. Phase 2 adds pre_arrival,
- * check_in and mid_stay as more `kind`s handled the same way: schedule from reservation
- * dates, move when the reservation changes, cancel when it's cancelled.
+ *   welcome         on check-in
+ *   mid_stay        morning after arrival (2+ night stays)
+ *   review_request  after checkout
+ *
+ * Jobs follow the reservation: they move when dates change, in-stay jobs are cancelled at
+ * checkout, and everything is cancelled with the reservation.
  */
+
+type Handler = (db: Db, stayId: string, messenger: Messenger, now: Date) => Promise<JobOutcome>;
+const HANDLERS: Record<string, Handler> = {
+  welcome: sendWelcome,
+  mid_stay: sendMidStay,
+  review_request: sendReviewRequest,
+};
 
 interface EventRow {
   id: string;
   type: string;
   stay_id: string | null;
   property_id: string;
+  occurred_at: Date;
 }
 
 interface StayTiming {
   status: string;
+  arrival_date: string;
   departure_date: string;
   checked_out_at: Date | string | null;
 }
 
 export async function processEvents(db: Db, limit = 500): Promise<number> {
   const events = await db.query<EventRow>(
-    `select id::text, type, stay_id::text, property_id from events
+    `select id::text, type, stay_id::text, property_id, occurred_at from events
       where processed_at is null order by id limit $1`,
     [limit],
   );
@@ -38,28 +51,42 @@ export async function processEvents(db: Db, limit = 500): Promise<number> {
   return events.length;
 }
 
+async function cancelJobs(db: Db, stayId: string, kinds: string[] | null, reason: string) {
+  await db.query(
+    `update jobs set status = 'cancelled', result = $3, updated_at = now()
+      where stay_id = $1 and status = 'pending' and ($2::text[] is null or kind = any($2::text[]))`,
+    [stayId, kinds, reason],
+  );
+}
+
 async function applyEvent(db: Db, e: EventRow & { stay_id: string }) {
-  if (e.type === "reservation.cancelled") {
-    await db.query(
-      "update jobs set status = 'cancelled', result = 'reservation cancelled', updated_at = now() where stay_id = $1 and status = 'pending'",
-      [e.stay_id],
-    );
-    return;
-  }
-  if (!["reservation.created", "reservation.modified", "guest.checked_out"].includes(e.type)) return;
+  if (e.type === "reservation.cancelled") return cancelJobs(db, e.stay_id, null, "reservation cancelled");
 
   const [stay] = await db.query<StayTiming>(
-    "select status, departure_date::text as departure_date, checked_out_at from stays where id = $1",
+    `select status, arrival_date::text as arrival_date, departure_date::text as departure_date, checked_out_at
+       from stays where id = $1`,
     [e.stay_id],
   );
   if (!stay || stay.status === "cancelled" || stay.status === "no_show") return;
-
   const property = await getProperty(db, e.property_id);
-  const checkout = stay.checked_out_at
-    ? DateTime.fromJSDate(new Date(stay.checked_out_at))
-    : scheduledCheckout(property, stay.departure_date);
-  const runAt = checkout.plus({ minutes: property.review_delay_min });
-  await scheduleJob(db, e.stay_id, "review_request", runAt.toJSDate());
+
+  if (e.type === "guest.checked_out") await cancelJobs(db, e.stay_id, ["welcome", "mid_stay"], "guest checked out");
+
+  if (e.type === "guest.checked_in") await scheduleJob(db, e.stay_id, "welcome", new Date(e.occurred_at));
+
+  if (stay.status === "in_house" && (e.type === "guest.checked_in" || e.type === "reservation.modified")) {
+    const mid = midStayTime(property, stay.arrival_date, stay.departure_date);
+    if (mid) await scheduleJob(db, e.stay_id, "mid_stay", mid.toJSDate());
+    else await cancelJobs(db, e.stay_id, ["mid_stay"], "stay too short");
+  }
+
+  if (["reservation.created", "reservation.modified", "guest.checked_out"].includes(e.type)) {
+    const checkout = stay.checked_out_at
+      ? DateTime.fromJSDate(new Date(stay.checked_out_at))
+      : scheduledCheckout(property, stay.departure_date);
+    const runAt = checkout.plus({ minutes: property.review_delay_min });
+    await scheduleJob(db, e.stay_id, "review_request", runAt.toJSDate());
+  }
 }
 
 /** Creates the job, or moves it if it's still pending. Finished jobs are never revived. */
@@ -104,8 +131,10 @@ export async function runDueJobs(db: Db, deps: RunDeps): Promise<RunSummary> {
   for (const job of jobs) {
     let outcome: JobOutcome;
     try {
-      if (job.kind === "review_request") outcome = await sendReviewRequest(db, job.stay_id, deps.messenger, now);
-      else outcome = { status: "skipped", result: `no handler for ${job.kind}` };
+      const handler = HANDLERS[job.kind];
+      outcome = handler
+        ? await handler(db, job.stay_id, deps.messenger, now)
+        : { status: "skipped", result: `no handler for ${job.kind}` };
     } catch (err) {
       const message = (err as Error).message;
       if (job.attempts >= MAX_ATTEMPTS) {

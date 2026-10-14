@@ -43,6 +43,15 @@ export async function syncReviews(db: Db, propertyId: string, deps: SyncDeps): P
   const reviews = await deps.source.fetchReviews(property);
   summary.fetched = reviews.length;
 
+  const totals = deps.source.summary(property);
+  if (totals) {
+    await db.query(
+      `insert into review_snapshots (property_id, source, day, review_count, avg_rating) values ($1, $2, $3, $4, $5)
+       on conflict (property_id, source, day) do update set review_count = excluded.review_count, avg_rating = excluded.avg_rating`,
+      [property.id, deps.source.name, now.setZone(property.timezone).toISODate(), totals.count, totals.average],
+    );
+  }
+
   for (const r of reviews) {
     const [row] = await db.query<{ id: string; inserted: boolean }>(
       `insert into reviews (property_id, source, external_id, author, rating, body, reviewed_at, existing_reply, synced_at)

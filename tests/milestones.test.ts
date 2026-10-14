@@ -14,10 +14,10 @@ async function ingest(db: Db, csv: string, kind: "arrivals" | "in_house" | "depa
   await processEvents(db);
 }
 
-async function job(db: Db, confirmation: string) {
+async function job(db: Db, confirmation: string, kind = "review_request") {
   const [j] = await db.query<{ status: string; run_at: Date; result: string | null }>(
-    "select j.status, j.run_at, j.result from jobs j join stays s on s.id = j.stay_id where s.confirmation = $1",
-    [confirmation],
+    "select j.status, j.run_at, j.result from jobs j join stays s on s.id = j.stay_id where s.confirmation = $1 and j.kind = $2",
+    [confirmation, kind],
   );
   return j!;
 }

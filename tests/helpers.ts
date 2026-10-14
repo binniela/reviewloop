@@ -8,6 +8,10 @@ export async function testDb(): Promise<Db> {
      values ('sunset', 'Sunset Inn', 'America/Los_Angeles', 'PLACE123', 'accounts/1/locations/2',
              'Warm and plain-spoken, family-run motel near the freeway.', 'Raj, General Manager')`,
   );
+  await db.query(
+    `update properties set sms_from = '+16265550000', desk_phones = '{+16265559001}', desk_emails = '{desk@sunset.example}',
+            gm_phone = '+16265559002' where id = 'sunset'`,
+  );
   return db;
 }
 

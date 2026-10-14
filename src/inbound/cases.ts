@@ -1,0 +1,133 @@
+import type { Db } from "../db.js";
+import { alertStaff, canTextGuest, guestVars, loadContact, renderTemplate, sendAndLog, staffUrl } from "../guest.js";
+import type { Messenger } from "../messaging.js";
+import { getProperty, nextAllowedSmsTime } from "../properties.js";
+import { DateTime } from "luxon";
+import { updateSatisfaction } from "./satisfaction.js";
+
+/** Staff actions on issues, plus the timers that run each tick (GM escalation, follow-ups). */
+
+const FOLLOWUP_DELAY_MIN = 30;
+
+export async function acknowledgeCase(db: Db, caseId: string, by: string, now = new Date()) {
+  await db.query(
+    "update recovery_cases set acknowledged_at = coalesce(acknowledged_at, $2), acknowledged_by = coalesce(acknowledged_by, $3) where id = $1",
+    [caseId, now.toISOString(), by],
+  );
+}
+
+export async function resolveCase(db: Db, caseId: string, resolution: string | null, by: string, now = new Date()) {
+  const [c] = await db.query<{ stay_id: string }>(
+    `update recovery_cases set resolved_at = $2, resolution = $3,
+            acknowledged_at = coalesce(acknowledged_at, $2), acknowledged_by = coalesce(acknowledged_by, $4),
+            followup_due_at = $5
+      where id = $1 and resolved_at is null returning stay_id::text`,
+    [caseId, now.toISOString(), resolution, by, new Date(now.getTime() + FOLLOWUP_DELAY_MIN * 60_000).toISOString()],
+  );
+  if (c) await updateSatisfaction(db, c.stay_id);
+}
+
+/** Staff texting the guest from the issues page. */
+export async function replyToGuest(db: Db, messenger: Messenger, caseId: string, text: string, by: string, now = new Date()) {
+  const body = text.trim();
+  if (!body) throw new Error("message is empty");
+  const [c] = await db.query<{ stay_id: string; property_id: string }>(
+    "select c.stay_id::text, s.property_id from recovery_cases c join stays s on s.id = c.stay_id where c.id = $1",
+    [caseId],
+  );
+  if (!c) throw new Error("issue not found");
+  const contact = (await loadContact(db, c.stay_id))!;
+  const texted = await guestHasTexted(db, c.stay_id);
+  const perm = await canTextGuest(db, contact, texted);
+  if (!perm.ok) throw new Error(`can't text this guest: ${perm.reason}`);
+  const property = await getProperty(db, c.property_id);
+  await sendAndLog(db, messenger, { property, kind: "staff", channel: "sms", to: perm.phone, body, stayId: c.stay_id, caseId, at: now });
+  await acknowledgeCase(db, caseId, by, now);
+}
+
+async function guestHasTexted(db: Db, stayId: string) {
+  return (await db.query("select 1 from messages where stay_id = $1 and direction = 'in' limit 1", [stayId])).length > 0;
+}
+
+export interface TimerSummary {
+  escalated: number;
+  followupsSent: number;
+  followupsSkipped: number;
+  errors: string[];
+}
+
+export async function runCaseTimers(db: Db, messenger: Messenger, nowDate: Date): Promise<TimerSummary> {
+  const summary: TimerSummary = { escalated: 0, followupsSent: 0, followupsSkipped: 0, errors: [] };
+  const now = nowDate.toISOString();
+
+  // Nobody at the desk responded in time: tell the GM (or re-alert the desk if there's no GM phone).
+  const stale = await db.query<{ id: string; stay_id: string; property_id: string; summary: string; name: string; room: string | null; minutes: number }>(
+    `select c.id::text, c.stay_id::text, s.property_id, c.summary,
+            concat_ws(' ', s.guest_first_name, s.guest_last_name) as name, s.room, p.escalation_minutes as minutes
+       from recovery_cases c join stays s on s.id = c.stay_id join properties p on p.id = s.property_id
+      where c.resolved_at is null and c.acknowledged_at is null and c.escalated_at is null and c.alerted_at is not null
+        and c.alerted_at + make_interval(mins => p.escalation_minutes) <= $1::timestamptz`,
+    [now],
+  );
+  for (const c of stale) {
+    const property = await getProperty(db, c.property_id);
+    const text = `No one has responded in ${c.minutes} min: ${c.name || "Guest"}, room ${c.room ?? "?"}: ${c.summary}\n${staffUrl("/issues")}`;
+    try {
+      await alertStaff(db, messenger, property, text, { caseId: c.id, stayId: c.stay_id, onlyGm: !!property.gm_phone, at: nowDate });
+      summary.escalated++;
+    } catch (err) {
+      summary.errors.push(`escalate case ${c.id}: ${(err as Error).message}`);
+    }
+    // Mark even on failure so we don't spam every tick; the case stays visible on the issues page.
+    await db.query("update recovery_cases set escalated_at = $2 where id = $1", [c.id, now]);
+  }
+
+  // "Is everything better now?" after a fix.
+  const due = await db.query<{ id: string; stay_id: string; property_id: string; status: string }>(
+    `select c.id::text, c.stay_id::text, s.property_id, s.status
+       from recovery_cases c join stays s on s.id = c.stay_id
+      where c.resolved_at is not null and c.followup_sent_at is null and c.followup_due_at <= $1::timestamptz`,
+    [now],
+  );
+  for (const c of due) {
+    const skip = async (why: string) => {
+      await db.query("update recovery_cases set followup_due_at = null where id = $1", [c.id]);
+      summary.followupsSkipped++;
+      return why;
+    };
+    if (c.status !== "in_house") {
+      await skip("guest no longer in house");
+      continue;
+    }
+    const property = await getProperty(db, c.property_id);
+    const contact = (await loadContact(db, c.stay_id))!;
+    const perm = await canTextGuest(db, contact, await guestHasTexted(db, c.stay_id));
+    if (!perm.ok) {
+      await skip(perm.reason);
+      continue;
+    }
+    const quiet = nextAllowedSmsTime(property, DateTime.fromJSDate(nowDate));
+    if (quiet) {
+      // Don't wake them up to ask; if they're checking out by then, skip it.
+      await db.query("update recovery_cases set followup_due_at = $2 where id = $1", [c.id, quiet.toISO()]);
+      continue;
+    }
+    try {
+      await sendAndLog(db, messenger, {
+        property,
+        kind: "followup",
+        channel: "sms",
+        to: perm.phone,
+        body: renderTemplate(property.followup_template, guestVars(property, contact)),
+        stayId: c.stay_id,
+        caseId: c.id,
+        at: nowDate,
+      });
+      await db.query("update recovery_cases set followup_sent_at = $2 where id = $1", [c.id, now]);
+      summary.followupsSent++;
+    } catch (err) {
+      summary.errors.push(`followup case ${c.id}: ${(err as Error).message}`);
+    }
+  }
+  return summary;
+}

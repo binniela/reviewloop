@@ -6,6 +6,8 @@ export interface ReviewSource {
   /** Whether this property is set up for this source (e.g. has a Google location). */
   supports(property: Property): boolean;
   fetchReviews(property: Property): Promise<SourceReview[]>;
+  /** Platform-wide totals from the most recent fetch, for the metrics page. */
+  summary(property: Property): { count: number; average: number | null } | null;
   postReply(property: Property, externalId: string, text: string): Promise<void>;
 }
 
@@ -39,6 +41,7 @@ interface GoogleReview {
 export class GoogleBusinessProfile implements ReviewSource {
   readonly name = "google";
   private token: { value: string; expires: number } | null = null;
+  private totals = new Map<string, { count: number; average: number | null }>();
 
   constructor(
     private readonly clientId: string,
@@ -79,8 +82,17 @@ export class GoogleBusinessProfile implements ReviewSource {
       url.searchParams.set("orderBy", "updateTime desc");
       if (pageToken) url.searchParams.set("pageToken", pageToken);
       const res = await fetch(url, { headers: { Authorization: `Bearer ${await this.accessToken()}` } });
-      const json = (await res.json()) as { reviews?: GoogleReview[]; nextPageToken?: string; error?: { message: string } };
+      const json = (await res.json()) as {
+        reviews?: GoogleReview[];
+        nextPageToken?: string;
+        totalReviewCount?: number;
+        averageRating?: number;
+        error?: { message: string };
+      };
       if (!res.ok) throw new Error(`Google reviews ${res.status}: ${json.error?.message ?? ""}`);
+      if (page === 0 && json.totalReviewCount !== undefined) {
+        this.totals.set(property.id, { count: json.totalReviewCount, average: json.averageRating ?? null });
+      }
       for (const r of json.reviews ?? []) {
         out.push({
           externalId: r.name, // full resource name, used directly when replying
@@ -95,6 +107,10 @@ export class GoogleBusinessProfile implements ReviewSource {
       if (!pageToken) break;
     }
     return out;
+  }
+
+  summary(property: Property) {
+    return this.totals.get(property.id) ?? null;
   }
 
   async postReply(_property: Property, externalId: string, text: string): Promise<void> {
@@ -123,6 +139,17 @@ export class MockReviewSource implements ReviewSource {
 
   async fetchReviews(property: Property) {
     return (this.reviews[property.id] ?? []).map((r) => ({ ...r }));
+  }
+
+  /** Mock totals: a starting baseline plus whatever reviews have been added. */
+  baseline: Record<string, { count: number; sum: number }> = {};
+
+  summary(property: Property) {
+    const base = this.baseline[property.id] ?? { count: 0, sum: 0 };
+    const rated = (this.reviews[property.id] ?? []).filter((r) => r.rating !== null);
+    const count = base.count + rated.length;
+    const sum = base.sum + rated.reduce((a, r) => a + r.rating!, 0);
+    return { count, average: count ? Math.round((sum / count) * 100) / 100 : null };
   }
 
   async postReply(property: Property, externalId: string, text: string) {

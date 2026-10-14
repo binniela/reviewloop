@@ -1,5 +1,6 @@
 import { DateTime } from "luxon";
 import type { Db } from "../db.js";
+import { canTextGuest, loadContact, renderTemplate, sendAndLog } from "../guest.js";
 import type { Messenger } from "../messaging.js";
 import { getProperty, googleReviewLink, nextAllowedSmsTime, scheduledCheckout } from "../properties.js";
 
@@ -22,10 +23,6 @@ export type JobOutcome =
 
 interface StayRow {
   property_id: string;
-  guest_first_name: string | null;
-  email: string | null;
-  phone: string | null;
-  sms_opt_in: boolean;
   status: string;
   departure_date: string;
   checked_out_at: Date | string | null;
@@ -34,8 +31,7 @@ interface StayRow {
 export async function sendReviewRequest(db: Db, stayId: string, messenger: Messenger, nowDate: Date): Promise<JobOutcome> {
   const now = DateTime.fromJSDate(nowDate).toUTC();
   const [stay] = await db.query<StayRow>(
-    `select property_id, guest_first_name, email, phone, sms_opt_in, status,
-            departure_date::text as departure_date, checked_out_at
+    `select property_id, status, departure_date::text as departure_date, checked_out_at
        from stays where id = $1`,
     [stayId],
   );
@@ -68,8 +64,10 @@ export async function sendReviewRequest(db: Db, stayId: string, messenger: Messe
 
   if (!property.google_place_id) return { status: "skipped", result: "property has no Google place ID" };
 
-  const channel = stay.sms_opt_in && stay.phone ? "sms" : stay.email ? "email" : null;
-  if (!channel) return { status: "skipped", result: "no consented contact" };
+  const contact = (await loadContact(db, stayId))!;
+  const sms = await canTextGuest(db, contact);
+  const channel = sms.ok ? "sms" : contact.email ? "email" : null;
+  if (!channel) return { status: "skipped", result: sms.ok ? "no consented contact" : `no consented contact (${sms.reason})` };
 
   if (channel === "sms") {
     const allowed = nextAllowedSmsTime(property, now);
@@ -77,17 +75,20 @@ export async function sendReviewRequest(db: Db, stayId: string, messenger: Messe
   }
 
   const body = renderTemplate(property.request_template, {
-    first_name: stay.guest_first_name ?? "there",
+    first_name: contact.firstName ?? "there",
     property_name: property.name,
     review_link: googleReviewLink(property.google_place_id),
   });
-  const to = channel === "sms" ? stay.phone! : stay.email!;
-  const { providerId } = await messenger.send({
+  const to = sms.ok ? sms.phone : contact.email!;
+  const providerId = await sendAndLog(db, messenger, {
+    property,
+    kind: "review_request",
     channel,
     to,
     body: channel === "sms" ? `${body}\nReply STOP to opt out.` : body,
     subject: channel === "email" ? `How was your stay at ${property.name}?` : undefined,
-    fromName: property.name,
+    stayId,
+    at: now.toJSDate(),
   });
 
   await db.query(
@@ -97,8 +98,4 @@ export async function sendReviewRequest(db: Db, stayId: string, messenger: Messe
   );
   const note = openCase ? " after recovery hold" : "";
   return { status: "done", result: `sent by ${channel}${note}` };
-}
-
-export function renderTemplate(template: string, vars: Record<string, string>): string {
-  return template.replace(/\{(\w+)\}/g, (m, k: string) => vars[k] ?? m);
 }

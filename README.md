@@ -1,74 +1,87 @@
 # Reviewloop
 
-Review requests, AI reply drafting, and guest-issue holds for independent hotels on ASI.
-Phase 1 of the plan: ASI report ingest, the checkout review-request milestone, Google review
-sync, Claude reply drafts, and a GM approval queue.
+Guest texting, service recovery, and review management for independent hotels on ASI.
+
+- **Phase 1:** ASI report import, post-checkout review requests, Google review sync, Claude reply drafts, GM approval queue
+- **Phase 2:** welcome and mid-stay texts, inbound guest texts with triage, issue alerts and GM escalation, fix follow-ups, check-in opt-in page, pilot metrics
 
 ## Quick start
 
+Needs Node 20.12 or newer.
+
 ```bash
 npm install
-npm test          # 28 tests, real Postgres via PGlite, no services needed
-npm run demo      # full walkthrough: reports in, texts out, reviews drafted
+npm test          # 51 tests against a real Postgres engine (PGlite), no services needed
+npm run demo      # one full stay: check-in, complaint, escalation, fix, review, reply
 npm run dev       # staff UI on http://localhost:3000
 ```
 
-Everything runs with no credentials: messages print to the console, Google is mocked, and
-replies use templates until `ANTHROPIC_API_KEY` is set. See `.env.example`.
+Everything runs without credentials: messages print instead of sending, Google is mocked,
+guest texts are triaged with keyword rules, and replies use templates. Copy `.env.example`
+to `.env` to turn real services on one at a time.
 
-## How it works
+## The guest journey
 
-```
-ASI report (CSV upload or POST /api/ingest)
-  -> parse + normalize (src/ingest/asiReport.ts)
-  -> reconcile against stored stays, emit idempotent events (src/ingest/reconcile.ts)
-  -> milestone engine schedules jobs (src/milestones/engine.ts)
-  -> due jobs send review requests (src/reviews/requests.ts)
+| When | What happens |
+|---|---|
+| Check-in | Welcome text (if they opted in): "text this number if you need anything" |
+| Morning after arrival, 10 AM | "How's everything so far?" (2+ night stays) |
+| Guest texts in | Triaged. Problem: issue opened, guest gets an acknowledgement, desk is alerted. Request: forwarded to desk. Happy: nothing. |
+| 20 min, nobody on it | GM gets a text |
+| Issue resolved | 30 min later: "Is everything better now?" A "no" reopens it and alerts the GM. |
+| 2 h after checkout | Review request, to every guest. An open issue holds it up to 48 h after checkout, then it sends anyway. |
+| Review posted | Claude drafts a reply with the stay's issue notes as private context. 4 to 5 stars auto-post; the rest wait for the GM. |
 
-Google reviews (polled each tick)
-  -> upsert, match to stay, draft with Claude (src/reviews/drafter.ts)
-  -> auto-post or approval queue (src/reviews/sync.ts)
-```
+## Staff pages
 
-One scheduler pass is `GET /cron/tick` with `Authorization: Bearer $CRON_SECRET`. Run it every
-5 to 15 minutes (Vercel Cron, Supabase pg_cron, or `LOCAL_TICK_SECONDS` locally).
+- `/issues` Guest issues. Refreshes every 30 seconds and chimes on new ones, so a desk with
+  only a landline can leave it open as its alert. Text the guest, mark "I'm on it", resolve.
+- `/` Review replies waiting for approval
+- `/metrics` Pilot metrics: Google review count and rating against the launch baseline, plus
+  weekly requests, reviews, reply time, issues caught, time to fix, mid-stay reply rate
+- `/upload` Upload ASI reports (CSV)
+- `/setup` Printable QR sign for each front desk. Guests scan it to opt in to texts.
 
-**Ingest is safe to repeat.** Reports overlap and get re-uploaded. Unchanged rows are no-ops,
-every event has an idempotency key, and a stale report can never move a guest backwards (for
-example an old in-house list uploaded after checkout). A reservation missing from a report is
-not treated as cancelled, because reports only cover a window.
+Public: `/checkin/:propertyId` (opt-in page), `/webhooks/twilio/sms` (Twilio, signature-checked).
+Machine: `GET /cron/tick` and `POST /api/ingest/:propertyId?kind=...` with `Authorization: Bearer $CRON_SECRET`.
 
-**Review request rules**
-- Sent `review_delay_min` (default 120) after the actual checkout time, or the property's
-  standard checkout time if the report has none.
-- Moves when the departure date changes, cancels with the reservation.
-- Waits if the guest hasn't been reported checked out yet; gives up a day after departure.
-- SMS only with consent (`SMS Opt In` column), otherwise email, otherwise skipped. No texts
-  during quiet hours (default 8 PM to 9 AM local).
-- **Every guest is asked.** An open guest issue only delays the request, up to 48 hours after
-  checkout, then it sends anyway. This is deliberate: asking only happy guests violates Google's
-  review policy and FTC guidance, and it's what Conduit does.
+## Design choices worth knowing
 
-**Reply rules** (`properties.reply_mode`)
-- `auto_high` (default): 4 and 5 stars post automatically, 3 and below wait for approval
-- `approval_all`: everything waits
-- `auto_all`: everything posts
-- Any review mentioning injury, police, bed bugs, refunds, discrimination and similar always waits.
-- Drafts get the stay's issue notes as private context, with instructions never to reveal
-  details the guest didn't post. GM edits are fed back as voice examples.
-- Replying directly on Google retires the pending draft.
+**Every guest is asked for a review.** Satisfaction only changes *when* (holding while an issue
+is open), never *whether*. Asking only happy guests violates Google's review policy and FTC
+guidance. Conduit does filter unhappy guests out, permanently; this is the compliant version.
+
+**Texting rules.** Marketing-style texts (welcome, mid-stay, review request) need consent: the
+PMS opt-in column or the QR check-in page. A guest who texts us first gets replies to that
+conversation. STOP blocks everything until START. No texts 8 PM to 9 AM local.
+
+**Triage.** Claude (Haiku by default) labels each text with sentiment, category, urgency and a
+one-line summary. Keyword rules are the fallback when there's no API key or the API fails, so a
+complaint is never dropped. Safety words (smoke, gas, leak, injury, police...) are always urgent,
+whatever the model says. A stated problem beats polite words: "room is nice but the AC is loud"
+is a complaint.
+
+**Imports are safe to repeat.** Unchanged rows are no-ops, every event has an idempotency key,
+a stale report can't move a guest backwards, and a reservation missing from a report isn't
+treated as cancelled. Twilio retries are deduplicated by MessageSid.
+
+**Stay satisfaction** (-1 to 1) comes from guest text sentiment and issues (open, resolved,
+reopened), with later signals weighted more. It's shown to staff and on metrics.
 
 ## Setting up a hotel
 
-1. Copy `config/properties.example.json`, fill in each hotel, run `npm run properties -- config/properties.json`
-2. Find the Google place ID (Google's Place ID Finder) and the Business Profile location name
-3. Get one real export of each ASI report and set `report_mapping` to its column names (see below)
-4. Upload reports at `/upload`, or have them posted to `/api/ingest/:propertyId?kind=departures`
+1. Copy `config/properties.example.json`, fill in each hotel, then `npm run properties -- config/properties.json`
+2. Google: the place ID (Google's Place ID Finder) and Business Profile location name
+3. Twilio: buy one number per hotel, set it as `sms_from`, point its incoming-message webhook to
+   `{PUBLIC_URL}/webhooks/twilio/sms`
+4. Set `desk_phones` (a cell at the desk, if there is one), `desk_emails`, and `gm_phone`
+5. Get one real export of each ASI report and set `report_mapping` (below)
+6. Print the QR sign from `/setup` for the front desk
 
 ### ASI column mapping
 
 ASI's export format isn't public, so the default mapping in `src/ingest/asiReport.ts` is a
-guess. Per property, override any of it:
+guess. Override any of it per property:
 
 ```json
 "report_mapping": {
@@ -81,22 +94,35 @@ guess. Per property, override any of it:
 }
 ```
 
-Rows that fail to parse are reported on the upload page instead of failing the file.
+Rows that fail to parse are listed on the upload page instead of failing the file.
 
 ## Before going live
 
 - [ ] Real ASI exports from a pilot hotel, mapping confirmed
-- [ ] How SMS consent gets captured at check-in (registration card checkbox or front desk)
-- [ ] Twilio A2P 10DLC registration approved (takes weeks, start now)
+- [ ] Where alerts go at each hotel (desk cell, GM, email, or the issues page left open) and who covers overnight
+- [ ] Front desk routine for handing out the QR code at check-in
+- [ ] Twilio A2P 10DLC registration approved (takes weeks, start now). The opt-in wording on
+      the check-in page is written for it; have it reviewed.
 - [ ] Google OAuth app + refresh token from an account managing all 4 locations. The Google
-      client is written against the Business Profile v4 reviews API but **has not been run
-      against a live account yet.**
-- [ ] `ADMIN_PASSWORD` and `CRON_SECRET` set; `MESSAGING_MODE=live`
+      client follows the Business Profile v4 reviews API but **hasn't run against a live account yet.**
+- [ ] `ADMIN_PASSWORD`, `CRON_SECRET`, `PUBLIC_URL` set; `MESSAGING_MODE=live`
 
 ## Not built yet
 
-- Phase 2: pre-arrival, check-in, and mid-stay messages; inbound SMS webhook; sentiment scoring
-- Phase 3: Booking.com, Expedia, Tripadvisor (draft plus deep link), rating dashboard, alerts
-- Real ASI integration if the partner program comes through (swap the CSV adapter; events,
-  milestones, and everything downstream stay the same)
-- Multi-user accounts (one shared login for now)
+- Phase 3: Booking.com, Expedia, Tripadvisor (draft plus deep link), low-rating alerts
+- Real ASI integration if the partner program comes through (swap the CSV adapter; everything downstream stays the same)
+- Individual staff logins (one shared login for now; the name typed into actions is not verified)
+- Pre-arrival message (hotels rarely need one; easy to add as another milestone)
+
+## Code map
+
+```
+src/ingest/       ASI CSV parsing, reconcile into stays + events
+src/milestones/   job scheduling and the welcome / mid-stay senders
+src/reviews/      review requests, Google sync, Claude drafting, approval rules
+src/inbound/      Twilio webhook handling, triage, issues, escalation, follow-ups, satisfaction
+src/consent.ts    check-in opt-in
+src/guest.ts      consent and opt-out checks, message log, staff alerts
+src/web/          staff and guest pages
+db/migrations/    schema
+```
