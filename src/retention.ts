@@ -25,7 +25,7 @@ export async function purgeGuestPii(db: Db, now = new Date(), days = 365): Promi
         and (guest_first_name is not null or guest_last_name is not null or email is not null or phone is not null
           or consent_phone is not null or room is not null or channel is not null)`, [cutoff]);
     await tx.query(`update outbound_queue set payload = '{}'::jsonb, last_error = null
-      where status in ('sent', 'cancelled') and coalesce(sent_at, locked_at, next_attempt_at) < $1
+      where status in ('sent', 'cancelled', 'failed') and coalesce(sent_at, locked_at, next_attempt_at) < $1
         and payload <> '{}'::jsonb`, [cutoff]);
     // Unmatched incoming texts have no stay to anchor them to the cutoff above.
     await tx.query(`update messages set from_addr = null, to_addr = '[redacted]', body = '[redacted]', classification = null

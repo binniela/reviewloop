@@ -15,6 +15,11 @@ import { updateSatisfaction } from "./satisfaction.js";
 
 const STOP = new Set(["stop", "stopall", "unsubscribe", "cancel", "end", "quit", "optout", "revoke"]);
 const START = new Set(["start", "unstop"]);
+// Carrier HELP keywords. Twilio's opt-out handling replies to these with the HELP text configured
+// for the number, so we don't send our own acknowledgement and don't treat "help" as urgent. The
+// desk still gets the text: a guest who sends it may really want someone.
+const HELP = new Set(["help", "info"]);
+const HELP_CLASSIFICATION: Classification = { sentiment: "neutral", category: "request", urgency: "normal", summary: "Texted HELP", by: "keywords" };
 
 export interface InboundSms {
   from: string;
@@ -50,7 +55,7 @@ export async function handleInbound(db: Db, deps: InboundDeps, sms: InboundSms):
     const [last] = await db.query<{ body: string }>(
       "select body from messages where property_id = $1 and stay_id = $2 and to_addr = $3 and direction = 'out' and kind <> 'alert' order by created_at desc, id desc limit 1", [property.id, stay, from],
     );
-    const classification = await deps.classifier.classify(sms.body, { lastOutbound: last?.body ?? null });
+    const classification = HELP.has(keyword) ? HELP_CLASSIFICATION : await deps.classifier.classify(sms.body, { lastOutbound: last?.body ?? null });
     classifier = { classify: async () => classification };
   }
   // Persist the incoming message, case changes, and outgoing work together. No provider sends inside
@@ -169,7 +174,7 @@ async function processInbound(db: Db, deps: InboundDeps, sms: InboundSms): Promi
       includeGm: classification.urgency === "urgent",
       at: now,
     });
-    await acknowledge(db, deps.messenger, property, contact, stayId, c!.id, complaint ? property.ack_template : property.request_ack_template, now);
+    if (!HELP.has(keyword)) await acknowledge(db, deps.messenger, property, contact, stayId, c!.id, complaint ? property.ack_template : property.request_ack_template, now);
     outcome = { action: "case_opened", caseId: c!.id, classification };
   } else {
     if (recent && classification.sentiment === "positive" && lastOutbound[0]?.kind === "followup" && lastOutbound[0].case_id === recent.id) {

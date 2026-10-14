@@ -13,7 +13,8 @@
     "demo": "tsx scripts/demo.ts",
     "properties": "tsx scripts/properties.ts",
     "icons": "tsx scripts/icons.ts",
-    "extension:zip": "mkdir -p dist && cd extension && zip -qr ../dist/reviewloop-extension.zip . -x '.*' && echo dist/reviewloop-extension.zip"
+    "extension:zip": "mkdir -p dist && cd extension && rm -f ../dist/reviewloop-extension.zip && zip -qr ../dist/reviewloop-extension.zip . -x '.*' -x '*.md' && echo dist/reviewloop-extension.zip",
+    "staging:check": "tsx scripts/staging-check.ts"
   },
   "license": "ISC",
   "dependencies": {

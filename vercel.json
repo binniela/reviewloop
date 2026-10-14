@@ -6,7 +6,7 @@
   "functions": {
     "api/index.ts": {
       "includeFiles": "{db/migrations/**,node_modules/@electric-sql/pglite/dist/**}",
-      "maxDuration": 30,
+      "maxDuration": 60,
       "memory": 1024
     }
   },

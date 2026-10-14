@@ -42,7 +42,11 @@ function harness(db: Db, start: string, classifier: Classifier = new KeywordClas
     source,
     set: (iso: string) => (clock = new Date(iso)),
     now: () => clock,
-    tick: () => tick(deps),
+    tick: async () => {
+      const r = await tick(deps);
+      if (!("cases" in r) || !r.cases) throw new Error(`tick did not run cleanly: ${JSON.stringify(r)}`);
+      return { ...r, cases: r.cases };
+    },
     ingest: (csv: string, kind: "arrivals" | "in_house" | "departures") => ingest(deps, "sunset", kind, csv),
     text: (body: string, from = GUEST) =>
       handleInbound(db, { messenger, classifier, now: () => clock }, { from, to: HOTEL, body, providerId: `SM${++sid}` }),

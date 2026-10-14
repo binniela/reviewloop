@@ -1,4 +1,4 @@
-import { DeliveryUncertainError } from "../messaging.js";
+import { DeliveryUncertainError, ProviderRejectedError } from "../messaging.js";
 import type { Db } from "../db.js";
 import { alertStaff, canTextGuest, guestVars, loadContact, renderTemplate, sendAndLog, staffUrl } from "../guest.js";
 import type { Messenger } from "../messaging.js";
@@ -10,14 +10,17 @@ import { updateSatisfaction } from "./satisfaction.js";
 
 const FOLLOWUP_DELAY_MIN = 30;
 
-export async function acknowledgeCase(db: Db, caseId: string, by: string, now = new Date()) {
-  await db.query(
-    "update recovery_cases set acknowledged_at = coalesce(acknowledged_at, $2), acknowledged_by = coalesce(acknowledged_by, $3) where id = $1",
+/** True when this call took the issue; false when someone already had it. */
+export async function acknowledgeCase(db: Db, caseId: string, by: string, now = new Date()): Promise<boolean> {
+  const rows = await db.query(
+    "update recovery_cases set acknowledged_at = $2, acknowledged_by = $3 where id = $1 and acknowledged_at is null returning 1",
     [caseId, now.toISOString(), by],
   );
+  return rows.length > 0;
 }
 
-export async function resolveCase(db: Db, caseId: string, resolution: string | null, by: string, now = new Date()) {
+/** True when this call resolved it; false when it was already resolved. */
+export async function resolveCase(db: Db, caseId: string, resolution: string | null, by: string, now = new Date()): Promise<boolean> {
   const [c] = await db.query<{ stay_id: string }>(
     `update recovery_cases set resolved_at = $2, resolution = $3,
             acknowledged_at = coalesce(acknowledged_at, $2), acknowledged_by = coalesce(acknowledged_by, $4),
@@ -26,10 +29,11 @@ export async function resolveCase(db: Db, caseId: string, resolution: string | n
     [caseId, now.toISOString(), resolution, by, new Date(now.getTime() + FOLLOWUP_DELAY_MIN * 60_000).toISOString()],
   );
   if (c) await updateSatisfaction(db, c.stay_id);
+  return !!c;
 }
 
-/** Staff texting the guest from the issues page. */
-export async function replyToGuest(db: Db, messenger: Messenger, caseId: string, text: string, by: string, now = new Date()) {
+/** Staff texting the guest from the issues page. Returns true when sending also took the issue. */
+export async function replyToGuest(db: Db, messenger: Messenger, caseId: string, text: string, by: string, now = new Date()): Promise<boolean> {
   const body = text.trim();
   if (!body) throw new Error("message is empty");
   const [c] = await db.query<{ stay_id: string; property_id: string }>(
@@ -47,7 +51,7 @@ export async function replyToGuest(db: Db, messenger: Messenger, caseId: string,
   if (!perm.ok) throw new Error(`can't text this guest: ${perm.reason}`);
   const property = await getProperty(db, c.property_id);
   await sendAndLog(db, messenger, { property, kind: "staff", channel: "sms", to: perm.phone, body, stayId: c.stay_id, caseId, at: now });
-  await acknowledgeCase(db, caseId, by, now);
+  return acknowledgeCase(db, caseId, by, now);
 }
 
 async function guestHasTexted(db: Db, stayId: string) {
@@ -100,7 +104,8 @@ export async function runCaseTimers(db: Db, messenger: Messenger, nowDate: Date)
   // A crashed sender may have reached the provider; do not blindly resend its follow-up.
   await db.query(`update recovery_cases set followup_due_at = null,
     followup_error = 'Worker interrupted; delivery outcome unknown. Reconcile with provider.'
-    where followup_claimed_at < $1::timestamptz - interval '10 minutes' and followup_sent_at is null`, [now]);
+    where followup_claimed_at < $1::timestamptz - interval '10 minutes' and followup_sent_at is null
+      and followup_due_at is not null`, [now]);
 
   // "Is everything better now?" after a fix.
   const due = await db.query<{ id: string; stay_id: string; property_id: string; status: string }>(
@@ -152,7 +157,7 @@ export async function runCaseTimers(db: Db, messenger: Messenger, nowDate: Date)
       summary.followupsSent++;
     } catch (err) {
       summary.errors.push(`followup case ${c.id}: ${(err as Error).message}`);
-      if (err instanceof DeliveryUncertainError) {
+      if (err instanceof DeliveryUncertainError || err instanceof ProviderRejectedError) {
         await db.query("update recovery_cases set followup_due_at = null, followup_error = $2 where id = $1", [c.id, (err as Error).message]);
       } else {
         await db.query("update recovery_cases set followup_claimed_at = null, followup_due_at = $2, followup_error = $3 where id = $1",

@@ -24,6 +24,8 @@ export interface SyncDeps {
   source: ReviewSource;
   drafter: ReplyDrafter;
   now?: () => Date;
+  /** Epoch ms after which no new draft is started; the rest wait for the next sync. */
+  deadline?: number;
 }
 
 export interface SyncSummary {
@@ -114,13 +116,15 @@ export async function syncReviews(db: Db, propertyId: string, deps: SyncDeps): P
       const draft = await deps.drafter.draft({ property, review, stayNotes, voiceExamples });
 
       const { decision } = decide(property.reply_mode, review.rating, review.body);
+      // Another sync may have drafted this review meanwhile; its draft stands.
       const [d] = await db.query<{ id: string }>(
         `insert into reply_drafts (review_id, draft, status, decided_by, decided_at)
-         values ($1, $2, $3, $4, $5) returning id::text`,
+         values ($1, $2, $3, $4, $5) on conflict (review_id) do nothing returning id::text`,
         decision === "auto"
           ? [review.id, draft, "approved", "auto", now.toISO()]
           : [review.id, draft, "pending", null, null],
       );
+      if (!d) continue;
       summary.drafted++;
       if (decision === "auto") {
         const posted = await postDraft(db, d!.id, deps.source, property);
@@ -132,6 +136,8 @@ export async function syncReviews(db: Db, propertyId: string, deps: SyncDeps): P
     } catch (err) {
       summary.errors.push(`review ${review.id}: ${(err as Error).message}`);
     }
+    // Checked after each draft, so every sync makes progress even when it starts late.
+    if (deps.deadline && Date.now() > deps.deadline) break;
   }
   return summary;
 }
@@ -216,9 +222,10 @@ export async function approveDraft(db: Db, source: ReviewSource, draftId: string
   return postDraft(db, draftId, source);
 }
 
-export async function dismissDraft(db: Db, draftId: string, approver: string) {
-  await db.query(
-    "update reply_drafts set status = 'dismissed', decided_by = $2, decided_at = now() where id = $1 and status in ('pending', 'failed')",
+export async function dismissDraft(db: Db, draftId: string, approver: string): Promise<boolean> {
+  const rows = await db.query(
+    "update reply_drafts set status = 'dismissed', decided_by = $2, decided_at = now() where id = $1 and status in ('pending', 'failed') returning 1",
     [draftId, approver],
   );
+  return rows.length > 0;
 }

@@ -1,4 +1,4 @@
-import { DeliveryUncertainError } from "../messaging.js";
+import { DeliveryUncertainError, ProviderRejectedError } from "../messaging.js";
 import { DateTime } from "luxon";
 import type { Db } from "../db.js";
 import type { Messenger } from "../messaging.js";
@@ -143,7 +143,7 @@ export async function runDueJobs(db: Db, deps: RunDeps): Promise<RunSummary> {
         : { status: "skipped", result: `no handler for ${job.kind}` };
     } catch (err) {
       const message = (err as Error).message;
-      if (err instanceof DeliveryUncertainError || job.attempts >= MAX_ATTEMPTS) {
+      if (err instanceof DeliveryUncertainError || err instanceof ProviderRejectedError || job.attempts >= MAX_ATTEMPTS) {
         await finish(db, job.id, "failed", message);
         summary.failed++;
       } else {

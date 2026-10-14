@@ -95,7 +95,7 @@ describe("http app", () => {
 
   it("limits login attempts in the database across app instances", async () => {
     const { app, db } = await setup({ adminUser: "raj", adminPassword: "pw" });
-    const second = createApp({ db, messenger: new ConsoleMessenger(true), source: new MockReviewSource(), drafter: new TemplateDrafter(), adminUser: "raj", adminPassword: "pw" });
+    const second = createApp({ db, messenger: new ConsoleMessenger(true), source: new MockReviewSource(), drafter: new TemplateDrafter(), adminUser: "raj", adminPassword: "pw", now: () => new Date("2026-10-14T20:00:00Z") });
     const request = () => ({ method: "POST", headers: { Origin: "http://localhost" }, body: new URLSearchParams({ user: "raj", password: "wrong" }) });
     for (let i = 0; i < 10; i++) expect((await app.request("/login", request())).status).toBe(401);
     expect((await second.request("/login", request())).status).toBe(429);
@@ -103,7 +103,7 @@ describe("http app", () => {
 
   it("limits public check-in submissions across app instances", async () => {
     const { app, db } = await setup();
-    const second = createApp({ db, messenger: new ConsoleMessenger(true), source: new MockReviewSource(), drafter: new TemplateDrafter() });
+    const second = createApp({ db, messenger: new ConsoleMessenger(true), source: new MockReviewSource(), drafter: new TemplateDrafter(), now: () => new Date("2026-10-14T20:00:00Z") });
     const request = () => ({ method: "POST", body: new URLSearchParams({ last_name: "Guest", room: "101", phone: "6265550101", agree: "1" }) });
     for (let i = 0; i < 10; i++) expect((await app.request("/checkin/sunset", request())).status).toBe(200);
     expect((await second.request("/checkin/sunset", request())).status).toBe(429);

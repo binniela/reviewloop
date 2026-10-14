@@ -1,11 +1,13 @@
 import { html, raw } from "hono/html";
 import type { Db } from "../db.js";
 import { listProperties } from "../properties.js";
-import { icon, layout, timeAgo, type Flash } from "./layout.js";
+import { icon, layout, phoneLabel, timeAgo, type Flash } from "./layout.js";
+import { currentViewer, isGm } from "../viewer.js";
+import { checklist, setupSteps } from "./hotels.js";
 import { reportFreshness } from "./operations.js";
 
 /**
- * Guest issues inbox. Filter sidebar (views, hotels), tabs by state (Todo, In progress, Done),
+ * Guest issues inbox. Filter sidebar (views, hotels), tabs by state (To do, Follow up, Done),
  * search and sort, a list of guests, and the selected conversation in a panel on the right.
  * Server-rendered: every filter is a query parameter, so links and the back button just work.
  */
@@ -64,10 +66,7 @@ const CATEGORY_LABEL: Record<string, string> = {
   other: "Other",
 };
 const category = (c: string | null) => (c ? (CATEGORY_LABEL[c] ?? c) : null);
-const phone = (p: string) => {
-  const m = p.match(/^\+1(\d{3})(\d{3})(\d{4})$/);
-  return m ? `(${m[1]}) ${m[2]}-${m[3]}` : p;
-};
+const phone = phoneLabel;
 /** Staff usernames are stored as typed at sign-in ("maria"); show them as names. */
 const who = (name: string | null) => (name ? name.charAt(0).toUpperCase() + name.slice(1) : "Staff");
 const initials = (name: string) =>
@@ -183,6 +182,8 @@ export async function issuesPage(db: Db, now: Date, view: IssuesView = {}) {
     [now.toISOString()],
   );
   const stale = (await reportFreshness(db, now)).filter((f) => f.stale);
+  const steps = await setupSteps(db);
+  const stepsDone = steps.filter((s) => s.done).length;
   const failed = undelivered?.n ?? 0;
 
   // ---- URLs: every control keeps the other filters
@@ -197,7 +198,7 @@ export async function issuesPage(db: Db, now: Date, view: IssuesView = {}) {
   // ---- Filter sidebar
   const openIn = (pred: (c: CaseRow) => boolean) => open.filter(pred).length;
   const sn = (href: string, label: string, n: number | null, on: boolean, extra: unknown = "", hot = false) =>
-    html`<a class="sn-item ${on ? "on" : ""} ${hot && n ? "hot" : ""}" href="${href}">${extra}<span>${label}</span>${n != null ? html`<b>${n}</b>` : ""}</a>`;
+    html`<a class="sn-item ${on ? "on" : ""} ${hot && n ? "hot" : ""}" href="${href}" ${on ? raw('aria-current="page"') : ""}>${extra}<span>${label}</span>${n != null ? html`<b>${n}</b>` : ""}</a>`;
   const subnav = html`
     <p class="sn-title">Guest issues</p>
     ${sn(url({ view: "", hotel: "", id: "" }), "All issues", open.length, v === "all" && !hotel, html`<span class="sn-ico">${icon("issues")}</span>`)}
@@ -217,14 +218,14 @@ export async function issuesPage(db: Db, now: Date, view: IssuesView = {}) {
           )}`
       : ""}
     <p class="sn-label">Shortcuts</p>
-    ${sn("/", "Review replies", null, false, html`<span class="sn-ico">${icon("replies")}</span>`)}
+    ${!currentViewer() || isGm(currentViewer()) ? sn("/", "Review replies", null, false, html`<span class="sn-ico">${icon("replies")}</span>`) : ""}
     ${sn("/upload", "Upload report", null, false, html`<span class="sn-ico">${icon("upload")}</span>`)}
   `;
 
   // ---- Rows
   const avatar = (name: string, propertyId: string) =>
     html`<span class="avatar" style="background:${tint(name)}">${initials(name)}<i style="background:${color.get(propertyId)}"></i></span>`;
-  const row = (c: CaseRow) => html`<a class="row ${c.id === current?.id ? "on" : ""}" href="${url({ id: c.id })}">
+  const row = (c: CaseRow) => html`<a class="row ${c.id === current?.id ? "on" : ""}" href="${url({ id: c.id })}" ${c.id === current?.id ? raw('aria-current="true"') : ""}>
     <span class="unread ${!c.resolved_at && !c.acknowledged_at ? "is" : ""}" aria-hidden="true"></span>
     ${avatar(c.guest || "Guest", c.property_id)}
     <span class="row-main">
@@ -267,15 +268,8 @@ export async function issuesPage(db: Db, now: Date, view: IssuesView = {}) {
   </div>`;
   const setup = html`<div class="zero setup">
     <p class="zero-title">Let’s get your hotel set up.</p>
-    <p class="muted">Three steps and guest texts start flowing into this inbox.</p>
-    <ol class="steps">
-      <li class="${hotels.length ? "done" : ""}">
-        <b>Add your hotels</b>
-        <span>Fill in <code>config/properties.json</code> (start from the example), then run <code>npm run properties -- config/properties.json</code>.</span>
-      </li>
-      <li><b>Upload today’s reports</b><span>In-house and departures from ASI. <a href="/upload">Upload a report</a></span></li>
-      <li><b>Put the QR sign at the desk</b><span>Guests scan it to get texts during their stay. <a href="/setup">Print the sign</a></span></li>
-    </ol>
+    <p class="muted">A few steps and guest texts start flowing into this inbox.</p>
+    ${checklist(steps)}
   </div>`;
 
   let list: unknown;
@@ -284,14 +278,18 @@ export async function issuesPage(db: Db, now: Date, view: IssuesView = {}) {
   else if (v === "texts")
     list = hotelTexts.length ? hotelTexts.map(textRow) : zero("No other texts today.", "Thanks, questions and requests that didn’t need an issue show up here.");
   else if (rows.length) list = rows.map(row);
-  else if (q) list = zero("No matches.", `Nothing in ${tab === "done" ? "Done" : tab === "followup" ? "Follow up" : "Todo"} matches “${view.q}”.`);
+  else if (q) list = zero("No matches.", `Nothing in ${tab === "done" ? "Done" : tab === "followup" ? "Follow up" : "To do"} matches “${view.q}”.`);
   else if (tab === "todo") list = zero("Inbox zero.", "Nobody is waiting on you. When a guest texts about a problem, it lands here and the desk is alerted.");
   else if (tab === "followup") list = zero("No follow-ups waiting.", "Fixed issues wait here until the guest says it’s better, for up to 48 hours.");
   else list = zero("Nothing resolved this week yet.", "Fixed issues stay here for 7 days.");
 
-  // ---- Conversation panel
+  // ---- Conversation panel. "Resolve and open next" opens the next open issue in this same list.
+  const at = current ? rows.findIndex((r) => r.id === current.id) : -1;
+  // Prefer the next issue nobody has taken, then any later one, then earlier ones.
+  const rest = at >= 0 ? [...rows.slice(at + 1), ...rows.slice(0, at)] : [];
+  const nextUp = current && !current.resolved_at ? (rest.find((r) => !r.acknowledged_at) ?? rest[0]) : undefined;
   const panel = current
-    ? html`<section class="panel" aria-label="Conversation with ${current.guest || "guest"}">
+    ? html`<section class="panel" id="panel" tabindex="-1" aria-label="Conversation with ${current.guest || "guest"}">
         <header class="pane-head">
           ${avatar(current.guest || "Guest", current.property_id)}
           <div>
@@ -332,15 +330,16 @@ export async function issuesPage(db: Db, now: Date, view: IssuesView = {}) {
               ${view.draft && view.draft.caseId === current.id ? html`<p class="err small" role="alert">${view.draft.error}</p>` : ""}
               <form method="post" action="/issues/${current.id}/reply" class="compose" data-guard>
                 <textarea name="text" rows="2" placeholder="Text ${(current.guest || "the guest").split(" ")[0]}…" required>${view.draft && view.draft.caseId === current.id ? view.draft.text : ""}</textarea>
-                <button type="submit" class="send" aria-label="Send">${icon("send")}</button>
+                <button type="submit" class="send" aria-label="Send text">${icon("send")}</button>
               </form>
               <div class="pane-actions">
                 ${current.acknowledged_at
                   ? html`<form method="post" action="/issues/${current.id}/resolve" class="resolve" data-guard>
-                      <input name="resolution" placeholder="How was it fixed? (only staff see this)" required />
-                      <button type="submit">Resolve</button>
+                      <input name="resolution" placeholder="How was it fixed? (staff only)" aria-label="How was it fixed? Only staff see this." required />
+                      ${nextUp ? html`<input type="hidden" name="next" value="${url({ id: nextUp.id })}" />` : ""}
+                      <button type="submit" data-busy-text="Resolving…">${nextUp ? "Resolve and open next" : "Resolve"}</button>
                     </form>`
-                  : html`<form method="post" action="/issues/${current.id}/ack"><button type="submit">I’m on it</button></form>
+                  : html`<form method="post" action="/issues/${current.id}/ack"><button type="submit" data-busy-text="Taking it…">I’m on it</button></form>
                       <span class="muted small">Take it to stop the GM alert. You can resolve it after.</span>`}
               </div>
             </footer>`}
@@ -358,10 +357,14 @@ export async function issuesPage(db: Db, now: Date, view: IssuesView = {}) {
               <span><strong>${s.last_name}</strong> · Room ${s.room} · ${s.property}</span>
               <span class="muted">${phone(s.phone)} · ${timeAgo(s.created_at, now)}</span>
               <label class="check"><input type="checkbox" name="verified" value="1" required /> Checked in person</label>
-              <button type="submit" class="secondary">Connect</button>
+              <button type="submit" class="secondary sm" data-busy-text="Starting…">Start texts</button>
             </form>`,
           )}
         </section>`
+      : ""}
+    ${hotels.length && stepsDone < steps.length && (!currentViewer() || isGm(currentViewer()))
+      ? html`<p class="banner">${icon("hotel")}<strong>Setup: ${stepsDone} of ${steps.length} steps done.</strong>
+          <span class="muted">${steps.find((s) => !s.done)!.title}.</span> <a href="/hotels">Finish setup</a></p>`
       : ""}
     ${failed
       ? html`<p class="banner warn" role="status">${icon("alert")}<strong>${failed} text${failed === 1 ? "" : "s"} didn’t reach guests in the last day.</strong>
@@ -374,13 +377,29 @@ export async function issuesPage(db: Db, now: Date, view: IssuesView = {}) {
   `;
 
   const tabLink = (t: Tab, label: string) =>
-    html`<a class="tab ${tab === t && v !== "texts" ? "on" : ""}" href="${url({ tab: t, view: v === "texts" ? "" : state.view, id: "" })}">${label}<b>${counts[t]}</b></a>`;
+    html`<a class="tab ${tab === t && v !== "texts" ? "on" : ""}" href="${url({ tab: t, view: v === "texts" ? "" : state.view, id: "" })}" ${tab === t && v !== "texts" ? raw('aria-current="page"') : ""}>${label}<b>${counts[t]}</b></a>`;
+  // Below 1100px the filter sidebar is hidden; the same views and hotels live in this menu.
+  const viewLabel = { all: "All issues", urgent: "Urgent", requests: "Requests", texts: "Other texts" } as const;
+  const filterMenu = html`<details class="menu filter-menu">
+    <summary class="tool">${icon("issues")}<span>${hotel ? hotels.find((h) => h.id === hotel)!.name : viewLabel[v]}</span></summary>
+    <div class="menu-pop">
+      ${(["all", "urgent", "requests", "texts"] as const).map(
+        (x) => html`<a class="${v === x ? "on" : ""}" href="${url({ view: x === "all" ? "" : x, id: "" })}">${viewLabel[x]}</a>`,
+      )}
+      ${hotels.length > 1
+        ? html`<p>Hotels</p>
+            <a class="${hotel ? "" : "on"}" href="${url({ hotel: "", id: "" })}">All hotels</a>
+            ${hotels.map((h) => html`<a class="${hotel === h.id ? "on" : ""}" href="${url({ hotel: h.id, id: "" })}">${h.name}</a>`)}`
+        : ""}
+    </div>
+  </details>`;
   const sortLabel = { priority: "Urgent first", newest: "Newest", oldest: "Oldest" } as const;
 
   const body = html`
     <div class="tabsbar">
-      ${tabLink("todo", "Todo")} ${tabLink("followup", "Follow up")} ${tabLink("done", "Done")}
+      ${tabLink("todo", "To do")} ${tabLink("followup", "Follow up")} ${tabLink("done", "Done")}
       <span class="tools">
+        ${filterMenu}
         <details class="menu">
           <summary class="tool">${icon("sort")}<span>${sortLabel[sort]}</span></summary>
           <div class="menu-pop">
@@ -401,7 +420,7 @@ export async function issuesPage(db: Db, now: Date, view: IssuesView = {}) {
     </div>
     ${banners}
     <div class="inbox-body ${current ? "has-sel" : ""}">
-      <div class="list">${list}</div>
+      <div class="list">${list}${rows.length > 1 && v !== "texts" ? html`<p class="list-hint">Press <kbd>j</kbd> and <kbd>k</kbd> to move between issues, <kbd>/</kbd> to search.</p>` : ""}</div>
       ${panel}
     </div>
   `;
@@ -418,7 +437,7 @@ export async function issuesPage(db: Db, now: Date, view: IssuesView = {}) {
           </select>
         </label>
         <label>What’s wrong <input name="summary" required placeholder="e.g. AC not cooling" /></label>
-        <button type="submit">Log issue</button>
+        <button type="submit" data-busy-text="Logging…">Log issue</button>
       </form>
     </details>
   `;
@@ -458,14 +477,28 @@ function liveScript(unacked: number) {
   document.addEventListener("DOMContentLoaded", function () {
     var t = document.getElementById("thread");
     if (t) t.scrollTop = t.scrollHeight;
+    // An open conversation takes focus, so Tab goes straight to the reply box and "I'm on it".
+    var panel = document.getElementById("panel");
+    if (panel && !document.querySelector("[role=alert]")) panel.focus({ preventScroll: true });
     document.addEventListener("keydown", function (e) {
       var a = document.activeElement;
-      if (e.key === "/" && !(a && /^(INPUT|TEXTAREA|SELECT)$/.test(a.tagName))) {
+      var typing = a && (/^(INPUT|TEXTAREA|SELECT)$/.test(a.tagName) || a.isContentEditable);
+      if (typing || e.metaKey || e.ctrlKey || e.altKey) return;
+      if (e.key === "/") {
         var s = document.querySelector(".search input[name=q]");
         if (s) { e.preventDefault(); s.focus(); s.select(); }
       }
+      // j / k: next and previous issue in the list.
+      if (e.key === "j" || e.key === "k") {
+        var rows = Array.prototype.slice.call(document.querySelectorAll(".list a.row"));
+        if (!rows.length) return;
+        var i = rows.findIndex(function (r) { return r.classList.contains("on"); });
+        var to = i < 0 ? rows[0] : rows[i + (e.key === "j" ? 1 : -1)];
+        if (to) { e.preventDefault(); location.href = to.href; }
+      }
     });
     var busy = function () {
+      if (window.rlSubmitting) return true;
       var a = document.activeElement;
       if (a && /^(INPUT|TEXTAREA|SELECT)$/.test(a.tagName)) return true;
       return Array.prototype.some.call(document.querySelectorAll("[data-guard] textarea, [data-guard] input:not([type=checkbox])"), function (el) { return el.value.trim() !== ""; })
