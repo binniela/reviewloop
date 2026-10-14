@@ -169,7 +169,9 @@ export function createApp(deps: AppDeps) {
     if (!p) return c.notFound();
     const form = await c.req.parseBody();
     const values = { last_name: String(form.last_name ?? ""), room: String(form.room ?? ""), phone: String(form.phone ?? "") };
-    if (await rateLimited(db, "checkin", `${p.id}:${values.last_name.toLowerCase()}:${values.room.toLowerCase()}`, 10, now()))
+    if (await rateLimited(db, "checkin-property", p.id, 500, now()) ||
+        await rateLimited(db, "checkin-phone", `${p.id}:${values.phone.replace(/\D/g, "")}`, 10, now()) ||
+        await rateLimited(db, "checkin-guest", `${p.id}:${values.last_name.toLowerCase()}:${values.room.toLowerCase()}`, 10, now()))
       return c.html(checkinForm(p, "Too many attempts. Please ask the front desk."), 429);
     const res = await recordConsent(db, deps.messenger, {
       propertyId: p.id,
