@@ -1,7 +1,7 @@
 import { DateTime } from "luxon";
 import type { Db } from "./db.js";
 import { lastTick, TICK_STALE_MS } from "./scheduler.js";
-import { listProperties } from "./properties.js";
+import { listProperties, PAUSED } from "./properties.js";
 import { CREDENTIALS_ERROR } from "./messaging.js";
 import { alertHealth, problemCounts, reportFreshness } from "./web/operations.js";
 
@@ -79,7 +79,7 @@ export async function alertStatus(db: Db, now: Date, opts: AlertOptions): Promis
   }
   if (counts.retrying) {
     const [last] = await db.query<{ last_error: string }>(
-      "select last_error from outbound_queue where status not in ('sent','cancelled') and last_error is not null order by next_attempt_at desc limit 1",
+      `select last_error from outbound_queue where status not in ('sent','cancelled') and last_error is not null and last_error <> '${PAUSED}' order by next_attempt_at desc limit 1`,
     );
     alerts.push({
       code: "texts_failing",

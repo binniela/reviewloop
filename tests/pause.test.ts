@@ -98,6 +98,19 @@ describe("pausing guest texts for a hotel", () => {
     await db.close();
   });
 
+  it("doesn't report held texts as failing, so a pause never pages anyone", async () => {
+    const db = await testDb();
+    const h = harness(db, "2026-10-13T17:00:00Z");
+    await h.ingest("In House", "in_house");
+    await pauseGuestTexts(db, "sunset", "Raj", new Date("2026-10-13T16:00:00Z"));
+    await h.text("The TV doesn't work"); // the acknowledgement is held in the queue
+    expect(await db.query("select 1 from outbound_queue where status = 'pending'")).toHaveLength(1);
+    const { ok, alerts } = await alertStatus(db, new Date("2026-10-13T17:05:00Z"), { scheduler: false });
+    expect(alerts.map((a) => a.code)).toEqual(["guest_texts_paused"]);
+    expect(ok).toBe(true);
+    await db.close();
+  });
+
   it("shows as a warning on Operations while paused", async () => {
     const db = await testDb();
     await pauseGuestTexts(db, "sunset", "Raj", new Date("2026-10-15T19:00:00Z"));
