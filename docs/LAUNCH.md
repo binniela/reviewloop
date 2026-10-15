@@ -85,8 +85,9 @@ Status as of 2026-10-14. Items marked **(you)** need your account, your money, o
    restorable backups.
 3. **Connect** → **Transaction pooler** (port 6543) string → `DATABASE_URL` on Vercel Production.
    Keep the **Session pooler** (port 5432, IPv4) string for scripts on your laptop.
-4. Optional but better: Database Settings → SSL → download the certificate and paste it into
-   `DATABASE_CA_CERT`.
+4. **Required:** Database Settings → SSL → download the certificate and paste it into
+   `DATABASE_CA_CERT`. Remote connections are always certificate-verified, and Supabase's chain is
+   not in Node's default trust store, so without it the app can't reach the database.
 5. Settings → API (Data API): turn it off or remove `public` from exposed schemas. This app never
    uses it. RLS is enabled by the explicit migration command; confirm in **Advisors → Security** (no "RLS
    disabled" findings after migration).
@@ -130,7 +131,7 @@ Vercel → Settings → Environment Variables. Mark every secret **Sensitive**.
 | `PUBLIC_URL` | `https://<your domain>` (Twilio signs this exact URL) | unset |
 | `MESSAGING_MODE` | `live` | **unset** (startup refuses `live` on previews) |
 | `TWILIO_*`, `GOOGLE_*`, `ANTHROPIC_API_KEY`, `RESEND_API_KEY`, `EMAIL_FROM` | real | unset |
-| `DATABASE_CA_CERT` | optional | — |
+| `DATABASE_CA_CERT` | Supabase's CA certificate (required for Supabase) | the staging project's, if `DATABASE_URL` is set |
 | `REVIEWLOOP_DEMO` | unset (set `1` only on a demo project) | — |
 
 ```bash
