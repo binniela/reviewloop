@@ -82,6 +82,7 @@ describe("live migration preflight", () => {
       const client = {
         query: async (sql: string) => {
           calls.push(sql);
+          if (/pg_try_advisory_lock/.test(sql)) return { rows: [{ ok: true }] };
           return { rows: sql === "select name from schema_migrations" ? files.filter((f) => f !== target).map((name) => ({ name })) : [] };
         },
         release: () => {},

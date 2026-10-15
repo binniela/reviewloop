@@ -45,13 +45,30 @@ async function buildOnlineIndex(client: import("pg").PoolClient, statement: stri
   await client.query(statement);
 }
 
+const MIGRATION_LOCK_WAIT_MS = 10 * 60_000;
+
+/**
+ * Polls instead of blocking in pg_advisory_lock. A blocked lock call is an open statement, and the
+ * holder's CREATE INDEX CONCURRENTLY waits for every open statement to finish: each would wait on
+ * the other forever (Postgres reports a deadlock). Between polls this session holds nothing.
+ */
+async function acquireMigrationLock(client: import("pg").PoolClient): Promise<void> {
+  const deadline = Date.now() + MIGRATION_LOCK_WAIT_MS;
+  for (;;) {
+    const { rows } = await client.query<{ ok: boolean }>("select pg_try_advisory_lock(790287316) as ok");
+    if (rows[0]?.ok) return;
+    if (Date.now() > deadline) throw new Error("Another migration has held the lock for 10 minutes; check for a stuck npm run migrate");
+    await new Promise((resolve) => setTimeout(resolve, 250));
+  }
+}
+
 async function migratePostgres(db: Db & { pool: import("pg").Pool }, files: string[]): Promise<string[]> {
   const client = await db.pool.connect();
   const ran: string[] = [];
   let locked = false;
   try {
     // A session pooler or direct connection is required. Transaction poolers cannot hold this lock.
-    await client.query("select pg_advisory_lock(790287316)");
+    await acquireMigrationLock(client);
     locked = true;
     await client.query("create table if not exists schema_migrations (name text primary key, applied_at timestamptz not null default now())");
     const applied = new Set((await client.query<{ name: string }>("select name from schema_migrations")).rows.map((r) => r.name));
