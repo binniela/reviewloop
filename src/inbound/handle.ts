@@ -21,6 +21,24 @@ const START = new Set(["start", "unstop"]);
 const HELP = new Set(["help", "info"]);
 const HELP_CLASSIFICATION: Classification = { sentiment: "neutral", category: "request", urgency: "normal", summary: "Texted HELP", by: "keywords" };
 
+// A guest who writes "please stop texting me" has opted out as surely as one who sends STOP.
+// Deliberately broad: wrongly honoring an opt-out costs a text; ignoring one costs the guest's trust
+// and a compliance problem. "Stop by with towels" and "the noise won't stop" don't match.
+const OPT_OUT_PHRASES = [
+  /\b(stop|quit|cease)\s+(texting|messaging|sending|contacting|txting)\b/i,
+  /\b(don'?t|do not|dont|never)\s+(text|message|sms|contact)\b/i,
+  /\bno more (texts|messages|sms)\b/i,
+  /\bunsubscribe\b/i,
+  /\bopt(\s|-)?(me\s+)?out\b/i,
+  /\b(remove|take) me (from|off)\b/i,
+  /^\s*(please\s+)?stop[\s,.!]*(please|now|it|this|thanks?|thank you)?[\s.!]*$/i,
+];
+
+/** A carrier keyword (STOP), or an opt-out written in plain words. */
+export function isOptOutPhrase(body: string): boolean {
+  return OPT_OUT_PHRASES.some((re) => re.test(body));
+}
+
 export interface InboundSms {
   from: string;
   to: string;
@@ -49,7 +67,7 @@ export async function handleInbound(db: Db, deps: InboundDeps, sms: InboundSms):
   const keyword = sms.body.trim().toLowerCase().replace(/[^a-z]/g, "");
   const property = await propertyForNumber(db, sms.to);
   if (!property) return { action: "unknown_property" };
-  if (!STOP.has(keyword) && !START.has(keyword) && !(await db.query("select 1 from messages where provider_id = $1", [sms.providerId])).length) {
+  if (!STOP.has(keyword) && !START.has(keyword) && !isOptOutPhrase(sms.body) && !(await db.query("select 1 from messages where provider_id = $1", [sms.providerId])).length) {
     const from = normalizePhone(sms.from) ?? sms.from;
     const stay = await matchStay(db, property.id, from, deps.now?.() ?? new Date());
     const [last] = await db.query<{ body: string }>(
@@ -89,6 +107,19 @@ async function processInbound(db: Db, deps: InboundDeps, sms: InboundSms): Promi
   }
 
   const stayId = await matchStay(db, property.id, from, now);
+  if (isOptOutPhrase(sms.body)) {
+    const logged = await logInbound(db, property, stayId, from, sms, null, now);
+    if (!logged) return { action: "duplicate" };
+    await db.query("insert into opt_outs (phone, opted_out_at) values ($1, $2) on conflict do nothing", [from, now.toISOString()]);
+    // No reply to the guest. A person at the desk still sees it, in case they meant something else.
+    const contact = stayId ? await loadContact(db, stayId) : null;
+    const who = contact ? `${[contact.firstName, contact.lastName].filter(Boolean).join(" ") || "Guest"}, room ${contact.room ?? "?"}` : from;
+    await alertStaff(db, deps.messenger, property, `${who} asked not to get texts. We won't text them again unless they text START: "${sms.body.trim()}"\n${staffUrl("/issues")}`, {
+      stayId,
+      at: now,
+    });
+    return { action: "opted_out" };
+  }
   const lastOutbound = await db.query<{ id: string; body: string; kind: string; case_id: string | null }>(
     "select id::text, body, kind, case_id::text from messages where direction = 'out' and to_addr = $1 and property_id = $2 and kind <> 'alert' and stay_id = $3 order by created_at desc, id desc limit 1",
     [from, property.id, stayId],

@@ -200,6 +200,35 @@ describe("inbound texts", () => {
     expect((await h.text("start")).action).toBe("opted_in");
   });
 
+  it("treats a plain-language opt-out like STOP: no reply to the guest, the desk is told", async () => {
+    const { db, h } = await setup();
+    const res = await h.text("Please stop texting me");
+    expect(res.action).toBe("opted_out");
+    expect(await db.query("select phone from opt_outs")).toEqual([{ phone: GUEST }]);
+    expect(h.to(GUEST)).toHaveLength(0);
+    expect(h.to(DESK)[0]!.body).toMatch(/^Jo Park, room 104 asked not to get texts/);
+    expect(await db.query("select 1 from recovery_cases")).toHaveLength(0);
+    // Nothing scheduled reaches them afterwards.
+    h.set("2026-10-14T17:05:00Z");
+    await h.tick();
+    expect(h.to(GUEST)).toHaveLength(0);
+  });
+
+  it.each(["don't text me anymore", "UNSUBSCRIBE me please", "No more texts", "remove me from this list", "stop please"])(
+    "records %j as an opt-out",
+    async (body) => {
+      const { db, h } = await setup();
+      expect((await h.text(body)).action).toBe("opted_out");
+      expect(await db.query("select 1 from opt_outs")).toHaveLength(1);
+    },
+  );
+
+  it.each(["Can you stop by with towels?", "The noise won't stop", "Stop by the desk later?"])("does not treat %j as an opt-out", async (body) => {
+    const { db, h } = await setup();
+    expect((await h.text(body)).action).not.toBe("opted_out");
+    expect(await db.query("select 1 from opt_outs")).toHaveLength(0);
+  });
+
   it("forwards texts from numbers it can't match to a guest", async () => {
     const { h } = await setup();
     const res = await h.text("Room 210 the key card won't work", "+13105550199");
