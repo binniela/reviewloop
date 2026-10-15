@@ -1,6 +1,7 @@
 import { DeliveryUncertainError, ProviderRejectedError } from "./messaging.js";
 import type { Db } from "./db.js";
 import { isOptedOut, sendAndLog, type SendOptions } from "./guest.js";
+import { guestTextsPaused, PAUSE_RECHECK_MS, PAUSED } from "./properties.js";
 import type { Messenger } from "./messaging.js";
 
 export const deferredMessenger: Messenger = {
@@ -28,6 +29,12 @@ export async function dispatchOutbox(db: Db, messenger: Messenger, now = new Dat
       if (o.channel === "sms" && o.kind !== "alert" && await isOptedOut(db, o.to)) {
         await db.query("update outbound_queue set status = 'cancelled', last_error = 'guest opted out' where id = $1", [row.id]);
         result.cancelled++;
+        continue;
+      }
+      // Held, not dropped: it goes out once when the GM resumes texting. Staff alerts never wait.
+      if (o.kind !== "alert" && await guestTextsPaused(db, o.property.id)) {
+        await db.query("update outbound_queue set status = 'pending', attempts = attempts - 1, next_attempt_at = $2, last_error = $3 where id = $1",
+          [row.id, new Date(now.getTime() + PAUSE_RECHECK_MS).toISOString(), PAUSED]);
         continue;
       }
       await sendAndLog(db, messenger, { ...o, outboxId: row.id, at: now, dedupeKey: `outbox:${row.id}` });

@@ -71,9 +71,11 @@ export async function linkPendingConsents(db: Db, messenger: Messenger, property
     const stayId = await findStay(db, propertyId, c.last_name, c.room, now);
     if (!stayId) continue;
     await db.query("update consents set stay_id = $2 where id = $1", [c.id, stayId]);
-    await attach(db, messenger, stayId, c.phone, now);
+    // Queued, so a paused hotel holds the confirmation like any other guest text.
+    await attach(db, deferredMessenger, stayId, c.phone, now);
     linked++;
   }
+  if (linked) await dispatchOutbox(db, messenger, now);
   return linked;
 }
 

@@ -2,7 +2,7 @@ import { DeliveryUncertainError, ProviderRejectedError } from "../messaging.js";
 import type { Db } from "../db.js";
 import { alertStaff, canTextGuest, guestVars, loadContact, renderTemplate, sendAndLog, staffUrl } from "../guest.js";
 import type { Messenger } from "../messaging.js";
-import { getProperty, nextAllowedSmsTime } from "../properties.js";
+import { getProperty, nextAllowedSmsTime, PAUSE_RECHECK_MS, PAUSED } from "../properties.js";
 import { DateTime } from "luxon";
 import { updateSatisfaction } from "./satisfaction.js";
 
@@ -127,6 +127,10 @@ export async function runCaseTimers(db: Db, messenger: Messenger, nowDate: Date)
     const property = await getProperty(db, c.property_id);
     const contact = (await loadContact(db, c.stay_id))!;
     const perm = await canTextGuest(db, contact, await guestHasTexted(db, c.stay_id));
+    if (!perm.ok && perm.reason === PAUSED) {
+      await db.query("update recovery_cases set followup_due_at = $2 where id = $1", [c.id, new Date(nowDate.getTime() + PAUSE_RECHECK_MS).toISOString()]);
+      continue;
+    }
     if (!perm.ok) {
       await skip(perm.reason);
       continue;

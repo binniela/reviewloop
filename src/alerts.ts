@@ -126,6 +126,15 @@ export async function alertStatus(db: Db, now: Date, opts: AlertOptions): Promis
   }
 
   const properties = await listProperties(db);
+  const paused = properties.filter((p) => p.guest_texts_paused_at);
+  if (paused.length) {
+    alerts.push({
+      code: "guest_texts_paused",
+      severity: "warning",
+      title: "Guest texts are paused",
+      detail: `${paused.map((p) => `${p.name} (by ${p.guest_texts_paused_by ?? "a GM"})`).join(", ")}: welcome, check-in, follow-up and review-request texts are held until you resume them on Hotel setup. Staff alerts still go out.`,
+    });
+  }
   const names = new Map(properties.map((p) => [p.id, p.name]));
   const syncRows = await db.query<{ key: string; value: string }>("select key, value from sync_state where key like 'reviews:%'");
   const failing: { name: string; error: string; critical: boolean }[] = [];

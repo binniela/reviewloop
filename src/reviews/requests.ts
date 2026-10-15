@@ -2,7 +2,7 @@ import { DateTime } from "luxon";
 import type { Db } from "../db.js";
 import { canTextGuest, loadContact, renderTemplate, sendAndLog } from "../guest.js";
 import type { Messenger } from "../messaging.js";
-import { getProperty, googleReviewLink, nextAllowedSmsTime, scheduledCheckout } from "../properties.js";
+import { getProperty, googleReviewLink, nextAllowedSmsTime, PAUSE_RECHECK_MS, PAUSED, scheduledCheckout } from "../properties.js";
 
 /**
  * Sends the post-checkout review request.
@@ -66,6 +66,7 @@ export async function sendReviewRequest(db: Db, stayId: string, messenger: Messe
 
   const contact = (await loadContact(db, stayId))!;
   const sms = await canTextGuest(db, contact);
+  if (!sms.ok && sms.reason === PAUSED) return { status: "deferred", runAt: now.plus({ milliseconds: PAUSE_RECHECK_MS }).toJSDate(), result: PAUSED };
   const channel = sms.ok ? "sms" : contact.email ? "email" : null;
   if (!channel) return { status: "skipped", result: sms.ok ? "no consented contact" : `no consented contact (${sms.reason})` };
 

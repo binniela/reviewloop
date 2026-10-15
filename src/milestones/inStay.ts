@@ -2,7 +2,7 @@ import { DateTime } from "luxon";
 import type { Db } from "../db.js";
 import { canTextGuest, guestVars, loadContact, renderTemplate, sendAndLog } from "../guest.js";
 import type { Messenger } from "../messaging.js";
-import { getProperty, nextAllowedSmsTime, scheduledCheckout, type Property } from "../properties.js";
+import { getProperty, nextAllowedSmsTime, PAUSE_RECHECK_MS, PAUSED, scheduledCheckout, type Property } from "../properties.js";
 import type { JobOutcome } from "../reviews/requests.js";
 
 /** Welcome text on check-in and the "how's everything?" check the morning after arrival. */
@@ -23,6 +23,13 @@ interface StayRow {
   status: string;
   departure_date: string;
   checked_in_at: Date | string | null;
+}
+
+/** A paused hotel holds the text for later; any other refusal is final for this stay. */
+export function notAllowed(reason: string, now: Date): JobOutcome {
+  return reason === PAUSED
+    ? { status: "deferred", runAt: new Date(now.getTime() + PAUSE_RECHECK_MS), result: reason }
+    : { status: "skipped", result: reason };
 }
 
 async function load(db: Db, stayId: string) {
@@ -47,7 +54,7 @@ export async function sendWelcome(db: Db, stayId: string, messenger: Messenger, 
   if (already.length) return { status: "skipped", result: "already welcomed" };
 
   const perm = await canTextGuest(db, contact);
-  if (!perm.ok) return { status: "skipped", result: perm.reason };
+  if (!perm.ok) return notAllowed(perm.reason, nowDate);
   const quiet = nextAllowedSmsTime(property, now);
   if (quiet) return { status: "deferred", runAt: quiet.toJSDate(), result: "quiet hours" };
 
@@ -70,7 +77,7 @@ export async function sendMidStay(db: Db, stayId: string, messenger: Messenger, 
   if (open.length) return { status: "skipped", result: "issue already open" };
 
   const perm = await canTextGuest(db, contact);
-  if (!perm.ok) return { status: "skipped", result: perm.reason };
+  if (!perm.ok) return notAllowed(perm.reason, nowDate);
   const quiet = nextAllowedSmsTime(property, now);
   if (quiet) return { status: "deferred", runAt: quiet.toJSDate(), result: "quiet hours" };
 

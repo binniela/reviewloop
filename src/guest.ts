@@ -1,7 +1,7 @@
 import { DeliveryUncertainError, ProviderRejectedError } from "./messaging.js";
 import type { Db } from "./db.js";
 import type { Messenger, OutboundMessage } from "./messaging.js";
-import type { Property } from "./properties.js";
+import { guestTextsPaused, PAUSED, type Property } from "./properties.js";
 
 /**
  * One place for reaching guests and staff, so consent, opt-outs and the message log are
@@ -130,6 +130,7 @@ export async function canTextGuest(db: Db, c: GuestContact, conversational = fal
   if (!c.phone) return { ok: false, reason: "no phone" };
   if (await isOptedOut(db, c.phone)) return { ok: false, reason: "guest opted out" };
   if (!c.smsConsent && !conversational) return { ok: false, reason: "no SMS consent" };
+  if (await guestTextsPaused(db, c.propertyId)) return { ok: false, reason: PAUSED };
   return { ok: true, phone: c.phone };
 }
 
