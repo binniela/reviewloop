@@ -4,7 +4,7 @@ import type { Db } from "../db.js";
 import type { Messenger } from "../messaging.js";
 import { getProperty, scheduledCheckout } from "../properties.js";
 import { sendReviewRequest, type JobOutcome } from "../reviews/requests.js";
-import { midStayTime, sendMidStay, sendWelcome } from "./inStay.js";
+import { isArrivalDay, midStayTime, sendMidStay, sendWelcome } from "./inStay.js";
 
 /**
  * Milestone engine. Turns stay events into scheduled jobs, then runs jobs when due.
@@ -73,7 +73,10 @@ async function applyEvent(db: Db, e: EventRow & { stay_id: string }) {
 
   if (e.type === "guest.checked_out") await cancelJobs(db, e.stay_id, ["welcome", "mid_stay"], "guest checked out");
 
-  if (e.type === "guest.checked_in") await scheduleJob(db, e.stay_id, "welcome", new Date(e.occurred_at));
+  // Only on the arrival day; a check-in we hear about the next morning gets the mid-stay text instead.
+  if (e.type === "guest.checked_in" && isArrivalDay(property, stay.arrival_date, new Date(e.occurred_at))) {
+    await scheduleJob(db, e.stay_id, "welcome", new Date(e.occurred_at));
+  }
 
   if (stay.status === "in_house" && (e.type === "guest.checked_in" || e.type === "reservation.modified")) {
     const mid = midStayTime(property, stay.arrival_date, stay.departure_date);

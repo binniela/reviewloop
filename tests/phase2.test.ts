@@ -79,6 +79,30 @@ describe("in-stay milestones", () => {
     expect(h.to(GUEST).at(-1)!.body).toBe("Hi Jo, how is everything with your room so far? Reply here if anything needs attention.");
   });
 
+  it("doesn't send a welcome the morning after arrival when the in-house report comes in late", async () => {
+    const db = await testDb();
+    const h = harness(db, "2026-10-13T14:30:00Z"); // 7:30 AM PT, the day after the 10/12 arrival
+    await h.ingest(inHouse(), "in_house");
+    expect((await jobs(db)).map((j) => j.kind)).not.toContain("welcome");
+    h.set("2026-10-13T16:05:00Z");
+    await h.tick();
+    expect(h.to(GUEST)).toHaveLength(0);
+    h.set("2026-10-13T17:05:00Z");
+    await h.tick();
+    expect(h.to(GUEST).map((m) => m.body)).toEqual(["Hi Jo, how is everything with your room so far? Reply here if anything needs attention."]);
+  });
+
+  it("skips a queued welcome once the arrival day has passed", async () => {
+    const db = await testDb();
+    const h = harness(db, "2026-10-13T05:30:00Z"); // 10:30 PM PT on arrival day: quiet hours hold the welcome
+    await h.ingest(inHouse(), "in_house");
+    await h.tick();
+    h.set("2026-10-13T16:05:00Z"); // 9:05 AM next day
+    await h.tick();
+    expect(h.to(GUEST)).toHaveLength(0);
+    expect((await jobs(db)).find((j) => j.kind === "welcome")).toMatchObject({ status: "skipped", result: "arrived before today" });
+  });
+
   it("skips mid-stay for one-night stays and cancels in-stay messages at checkout", async () => {
     const db = await testDb();
     const h = harness(db, "2026-10-12T23:00:00Z");

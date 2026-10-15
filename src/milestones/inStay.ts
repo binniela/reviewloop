@@ -21,8 +21,14 @@ export function midStayTime(p: Property, arrivalDate: string, departureDate: str
 interface StayRow {
   property_id: string;
   status: string;
+  arrival_date: string;
   departure_date: string;
   checked_in_at: Date | string | null;
+}
+
+/** Whether `at` is still the guest's arrival day, in the hotel's time zone. */
+export function isArrivalDay(p: Property, arrivalDate: string, at: Date): boolean {
+  return DateTime.fromJSDate(at).setZone(p.timezone).toISODate()! <= arrivalDate;
 }
 
 /** A paused hotel holds the text for later; any other refusal is final for this stay. */
@@ -34,7 +40,7 @@ export function notAllowed(reason: string, now: Date): JobOutcome {
 
 async function load(db: Db, stayId: string) {
   const [stay] = await db.query<StayRow>(
-    "select property_id, status, departure_date::text as departure_date, checked_in_at from stays where id = $1",
+    "select property_id, status, arrival_date::text as arrival_date, departure_date::text as departure_date, checked_in_at from stays where id = $1",
     [stayId],
   );
   if (!stay) return null;
@@ -47,6 +53,9 @@ export async function sendWelcome(db: Db, stayId: string, messenger: Messenger, 
   if (!ctx) return { status: "skipped", result: "stay not found" };
   const { stay, property, contact } = ctx;
   if (stay.status !== "in_house") return { status: "skipped", result: `guest is ${stay.status}` };
+  // checked_in_at is when the report was uploaded, not when they arrived. A welcome the morning
+  // after, an hour before the mid-stay check, reads as spam.
+  if (!isArrivalDay(property, stay.arrival_date, nowDate)) return { status: "skipped", result: "arrived before today" };
   if (stay.checked_in_at && now.diff(DateTime.fromJSDate(new Date(stay.checked_in_at)), "hours").hours > WELCOME_MAX_LATE_HOURS) {
     return { status: "skipped", result: "check-in reported too late for a welcome" };
   }
