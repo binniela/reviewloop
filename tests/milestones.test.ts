@@ -36,7 +36,7 @@ describe("review request milestone", () => {
     expect(messenger.sent).toHaveLength(1);
     await db.close();
   });
-  it("schedules 2 hours after actual checkout, uses SMS only with consent, falls back to email", async () => {
+  it("schedules 2 hours after actual checkout and asks by SMS only, never by email", async () => {
     const db = await testDb();
     await ingest(db, DEPARTURES_CSV, "departures", "2026-10-13T19:00:00Z");
 
@@ -47,20 +47,21 @@ describe("review request milestone", () => {
 
     const messenger = new ConsoleMessenger(true);
     const summary = await runDueJobs(db, { messenger, now: at("2026-10-13T20:30:00Z") });
-    expect(summary).toMatchObject({ done: 3 });
+    expect(summary).toMatchObject({ done: 2, skipped: 1 });
 
     const byTo = Object.fromEntries(messenger.sent.map((m) => [m.to, m]));
     expect(byTo["+16265550101"]!.channel).toBe("sms");
     expect(byTo["+16265550101"]!.body).toContain("Hi Anita, thanks for staying at Sunset Inn");
     expect(byTo["+16265550101"]!.body).toContain("placeid=PLACE123");
     expect(byTo["+16265550101"]!.body).toContain("Reply STOP");
-    expect(byTo["marcus@example.com"]!.channel).toBe("email"); // declined SMS
+    expect(byTo["marcus@example.com"]).toBeUndefined(); // declined SMS: no email fallback
+    expect((await job(db, "10002")).result).toBe("no SMS consent");
     expect(byTo["+16265550103"]!.channel).toBe("sms");
 
     // Running again never double-sends.
     const again = await runDueJobs(db, { messenger, now: at("2026-10-13T23:00:00Z") });
     expect(again.done).toBe(0);
-    expect(messenger.sent).toHaveLength(3);
+    expect(messenger.sent).toHaveLength(2);
   });
 
   it("schedules from the reservation, follows date changes, and cancels with the reservation", async () => {
@@ -169,7 +170,7 @@ describe("review request milestone", () => {
     await ingest(db, DEPARTURES_CSV, "departures", "2026-10-13T19:00:00Z");
     const failing = { send: async () => Promise.reject(new Error("Twilio 503")) };
     const s = await runDueJobs(db, { messenger: failing, now: at("2026-10-13T20:30:00Z") });
-    expect(s.retrying).toBe(3);
+    expect(s).toMatchObject({ retrying: 2, skipped: 1 }); // 10002 declined texts
     expect((await job(db, "10001")).result).toBe("retrying: Twilio 503");
   });
 });

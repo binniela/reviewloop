@@ -11,6 +11,9 @@ import { getProperty, googleReviewLink, nextAllowedSmsTime, PAUSE_RECHECK_MS, PA
  * WHEN: if a recovery case is still open, the request waits (up to RECOVERY_HOLD_HOURS after
  * checkout) so staff can make it right first, then goes out regardless. Selectively asking only
  * happy guests ("review gating") violates Google's review policy and FTC guidance.
+ *
+ * SMS only, to guests who agreed to texts. There is no email fallback: email consent, an
+ * unsubscribe link, and OTA relay addresses (guest.booking.com) all need answers first.
  */
 
 export const RECOVERY_HOLD_HOURS = 48;
@@ -67,27 +70,23 @@ export async function sendReviewRequest(db: Db, stayId: string, messenger: Messe
   const contact = (await loadContact(db, stayId))!;
   const sms = await canTextGuest(db, contact);
   if (!sms.ok && sms.reason === PAUSED) return { status: "deferred", runAt: now.plus({ milliseconds: PAUSE_RECHECK_MS }).toJSDate(), result: PAUSED };
-  const channel = sms.ok ? "sms" : contact.email ? "email" : null;
-  if (!channel) return { status: "skipped", result: sms.ok ? "no consented contact" : `no consented contact (${sms.reason})` };
+  if (!sms.ok) return { status: "skipped", result: sms.reason };
 
-  if (channel === "sms") {
-    const allowed = nextAllowedSmsTime(property, now);
-    if (allowed) return { status: "deferred", runAt: allowed.toJSDate(), result: "quiet hours" };
-  }
+  const allowed = nextAllowedSmsTime(property, now);
+  if (allowed) return { status: "deferred", runAt: allowed.toJSDate(), result: "quiet hours" };
 
   const body = renderTemplate(property.request_template, {
     first_name: contact.firstName ?? "there",
     property_name: property.name,
     review_link: googleReviewLink(property.google_place_id),
   });
-  const to = sms.ok ? sms.phone : contact.email!;
+  const to = sms.phone;
   const providerId = await sendAndLog(db, messenger, {
     property,
     kind: "review_request",
-    channel,
+    channel: "sms",
     to,
-    body: channel === "sms" ? `${body}\nReply STOP to opt out.` : body,
-    subject: channel === "email" ? `How was your stay at ${property.name}?` : undefined,
+    body: `${body}\nReply STOP to opt out.`,
     stayId,
     at: now.toJSDate(),
     dedupeKey: `review_request:${stayId}`,
@@ -96,8 +95,8 @@ export async function sendReviewRequest(db: Db, stayId: string, messenger: Messe
   await db.query(
     `insert into review_requests (stay_id, channel, destination, body, provider_id, sent_at)
      values ($1, $2, $3, $4, $5, $6)`,
-    [stayId, channel, to, body, providerId, now.toISO()],
+    [stayId, "sms", to, body, providerId, now.toISO()],
   );
   const note = openCase ? " after recovery hold" : "";
-  return { status: "done", result: `sent by ${channel}${note}` };
+  return { status: "done", result: `sent by sms${note}` };
 }
