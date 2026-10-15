@@ -10,7 +10,7 @@ import { DEPARTURES_CSV, testDb } from "./helpers.js";
 const tz = "America/Los_Angeles";
 const at = (iso: string) => () => new Date(iso);
 
-async function ingest(db: Db, csv: string, kind: "arrivals" | "in_house" | "departures", now: string) {
+async function ingest(db: Db, csv: string, kind: "arrivals" | "in_house" | "departures" | "reservations", now: string) {
   await reconcile(db, "sunset", parseAsiReport(csv, { kind, timezone: tz }).reservations, new Date(now));
   await processEvents(db);
 }
@@ -75,6 +75,33 @@ describe("review request milestone", () => {
 
     await ingest(db, csv("10/16/2026", "Cancelled"), "arrivals", "2026-10-13T16:00:00Z");
     expect((await job(db, "50")).status).toBe("cancelled");
+  });
+
+  it("lets a later no-show correct a checkout recorded by mistake, so the guest is never asked", async () => {
+    const db = await testDb();
+    // An arrivals file uploaded as Departures: no status column, so everyone looks checked out.
+    await ingest(db, `Confirmation,Guest Name,Phone,SMS Opt In,Room,Arrival,Departure\n70,"Arr, Bo",6265550170,Y,202,10/13/2026,10/14/2026\n`,
+      "departures", "2026-10-13T15:00:00Z");
+    expect((await job(db, "70")).status).toBe("pending");
+
+    await ingest(db, `Confirmation,Guest Name,Phone,SMS Opt In,Room,Arrival,Departure,Status\n70,"Arr, Bo",6265550170,Y,202,10/13/2026,10/14/2026,No Show\n`,
+      "reservations", "2026-10-14T15:00:00Z");
+    expect((await db.query<{ status: string }>("select status from stays where confirmation = '70'"))[0]!.status).toBe("no_show");
+    expect((await job(db, "70")).status).toBe("cancelled");
+
+    const messenger = new ConsoleMessenger(true);
+    await runDueJobs(db, { messenger, now: at("2026-10-14T21:00:00Z") });
+    expect(messenger.sent).toHaveLength(0);
+  });
+
+  it("keeps a checkout once the review request has gone out", async () => {
+    const db = await testDb();
+    await ingest(db, DEPARTURES_CSV, "departures", "2026-10-13T19:00:00Z");
+    const messenger = new ConsoleMessenger(true);
+    await runDueJobs(db, { messenger, now: at("2026-10-13T20:30:00Z") });
+    const cancel = DEPARTURES_CSV.replace("Checked Out,10:42 AM", "Cancelled,");
+    await ingest(db, cancel, "reservations", "2026-10-14T15:00:00Z");
+    expect((await db.query<{ status: string }>("select status from stays where confirmation = '10001'"))[0]!.status).toBe("checked_out");
   });
 
   it("waits for the checkout to be reported instead of messaging a guest still in house", async () => {

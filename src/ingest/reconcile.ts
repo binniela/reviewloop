@@ -89,7 +89,7 @@ async function reconcileRows(db: Db, propertyId: string, snapshots: ReservationS
     );
 
     const snap = { ...incoming };
-    if (existing && isRegression(existing.status, snap.status)) {
+    if (existing && isRegression(existing.status, snap.status) && !(await mistakenCheckout(db, existing, snap.status))) {
       // e.g. yesterday's in-house report uploaded after the guest left. Keep the later status,
       // but still accept contact/room corrections from the row.
       snap.status = existing.status;
@@ -162,6 +162,16 @@ async function reconcileRows(db: Db, propertyId: string, snapshots: ReservationS
 
 function rank(s: StayStatus | null): number {
   return s == null ? -1 : (PROGRESS[s] ?? -1);
+}
+
+/**
+ * A checkout followed by a no-show or cancellation means the checkout was wrong (usually an
+ * arrivals file uploaded as Departures). Believe the correction until we've asked the guest
+ * for a review; after that the stay really happened as far as the guest is concerned.
+ */
+async function mistakenCheckout(db: Db, existing: StoredStay, to: StayStatus): Promise<boolean> {
+  if (existing.status !== "checked_out" || (to !== "cancelled" && to !== "no_show")) return false;
+  return (await db.query("select 1 from review_requests where stay_id = $1", [existing.id])).length === 0;
 }
 
 function isRegression(from: StayStatus, to: StayStatus): boolean {
