@@ -284,3 +284,33 @@ describe("Postgres connection", () => {
     expect(() => pgPoolConfig("postgresql://u:p@db.internal:5432/rl?sslmode=disable", {})).toThrow("verified TLS");
   });
 });
+
+describe("text provider credentials", () => {
+  const unauthorized = { status: 401, body: { code: 20003, message: "Authenticate" } };
+
+  it("keeps retrying a queued text when Twilio rejects our credentials, and raises a critical alert", async () => {
+    fakeTwilio(Array.from({ length: 30 }, () => unauthorized));
+    const f = await fixture();
+    await f.db.query("delete from outbound_queue");
+    await f.db.query(`insert into outbound_queue (payload, next_attempt_at) values ($1, $2)`, [
+      JSON.stringify({ property: { id: "sunset", name: "Sunset Inn", sms_from: HOTEL }, kind: "alert", channel: "sms", to: "+16265559001", body: "test" }), START.toISOString(),
+    ]);
+    for (let i = 0; i < 20; i++) await dispatchOutbox(f.db, live(), later(i * 60));
+    const [row] = await f.db.query<{ status: string; last_error: string }>("select status, last_error from outbound_queue");
+    expect(row!.status).toBe("pending"); // a fixed token sends it; nothing is given up on
+    expect(row!.last_error).toMatch(/credentials/);
+    const { alertStatus } = await import("../src/alerts.js");
+    const { alerts, ok } = await alertStatus(f.db, later(20 * 60), { scheduler: false });
+    expect(ok).toBe(false);
+    expect(alerts.find((a) => a.code === "provider_credentials")).toMatchObject({ severity: "critical" });
+  });
+
+  it("keeps a scheduled text pending instead of failing it", async () => {
+    fakeTwilio(Array.from({ length: 30 }, () => unauthorized));
+    const f = await fixture();
+    for (let i = 0; i < 10; i++) await runDueJobs(f.db, { messenger: live(), now: () => later(i * 20) });
+    const [job] = await f.db.query<{ status: string; result: string }>("select status, result from jobs where kind = 'mid_stay'");
+    expect(job).toMatchObject({ status: "pending" });
+    expect(job!.result).toMatch(/credentials/);
+  });
+});

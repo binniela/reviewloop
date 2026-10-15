@@ -1,4 +1,4 @@
-import { DeliveryUncertainError, ProviderRejectedError } from "../messaging.js";
+import { DeliveryUncertainError, ProviderConfigError, ProviderRejectedError } from "../messaging.js";
 import { DateTime } from "luxon";
 import type { Db } from "../db.js";
 import type { Messenger } from "../messaging.js";
@@ -146,6 +146,13 @@ export async function runDueJobs(db: Db, deps: RunDeps): Promise<RunSummary> {
         : { status: "skipped", result: `no handler for ${job.kind}` };
     } catch (err) {
       const message = (err as Error).message;
+      if (err instanceof ProviderConfigError) {
+        // Our setup is broken, not this text: keep it waiting without using up its retries.
+        await db.query("update jobs set status = 'pending', run_at = $2, attempts = attempts - 1, result = $3, updated_at = now() where id = $1",
+          [job.id, new Date(now.getTime() + 15 * 60_000).toISOString(), `retrying: ${message}`]);
+        summary.retrying++;
+        continue;
+      }
       if (err instanceof DeliveryUncertainError || err instanceof ProviderRejectedError || job.attempts >= MAX_ATTEMPTS) {
         await finish(db, job.id, "failed", message);
         summary.failed++;

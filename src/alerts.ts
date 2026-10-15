@@ -2,6 +2,7 @@ import { DateTime } from "luxon";
 import type { Db } from "./db.js";
 import { lastTick, TICK_STALE_MS } from "./scheduler.js";
 import { listProperties } from "./properties.js";
+import { CREDENTIALS_ERROR } from "./messaging.js";
 import { alertHealth, problemCounts, reportFreshness } from "./web/operations.js";
 
 /**
@@ -122,6 +123,20 @@ export async function alertStatus(db: Db, now: Date, opts: AlertOptions): Promis
       severity: "warning",
       title: "Follow-up texts failing",
       detail: `${plural(counts.followups, "“Is everything better now?” text")} hit an error.`,
+    });
+  }
+
+  const [creds] = await db.query<{ n: number }>(
+    `select ((select count(*) from outbound_queue where status = 'pending' and last_error like $1)
+           + (select count(*) from jobs where status = 'pending' and result like $2))::int as n`,
+    [`${CREDENTIALS_ERROR}%`, `retrying: ${CREDENTIALS_ERROR}%`],
+  );
+  if (creds?.n) {
+    alerts.push({
+      code: "provider_credentials",
+      severity: "critical",
+      title: "Texts can’t be sent: the text service refused our login",
+      detail: `${plural(creds.n, "text")} waiting. Check the Twilio (or Resend) credentials in the hosting settings; held texts go out once they’re fixed.`,
     });
   }
 

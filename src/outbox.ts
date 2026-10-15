@@ -1,4 +1,4 @@
-import { DeliveryUncertainError, ProviderRejectedError } from "./messaging.js";
+import { DeliveryUncertainError, ProviderConfigError, ProviderRejectedError } from "./messaging.js";
 import type { Db } from "./db.js";
 import { isOptedOut, sendAndLog, type SendOptions } from "./guest.js";
 import { guestTextsPaused, PAUSE_RECHECK_MS, PAUSED } from "./properties.js";
@@ -8,6 +8,9 @@ export const deferredMessenger: Messenger = {
   deferred: true,
   send: async () => { throw new Error("Deferred messages must be persisted before dispatch"); },
 };
+
+/** How often a text held by a credentials problem tries again. */
+const CONFIG_RETRY_MS = 5 * 60_000;
 
 /** About four hours of retries with the backoff below, then a person has to look at it on Operations. */
 export const MAX_SEND_ATTEMPTS = 8;
@@ -42,6 +45,13 @@ export async function dispatchOutbox(db: Db, messenger: Messenger, now = new Dat
       result.sent++;
     } catch (error) {
       const message = (error as Error).message;
+      if (error instanceof ProviderConfigError) {
+        // Not this message's fault: don't spend its retries, try again once the setting is fixed.
+        await db.query("update outbound_queue set status = 'pending', attempts = attempts - 1, next_attempt_at = $2, last_error = $3 where id = $1 and status = 'sending'",
+          [row.id, new Date(now.getTime() + CONFIG_RETRY_MS).toISOString(), message]);
+        result.errors.push(`message ${row.id}: ${message}`);
+        continue;
+      }
       if (error instanceof ProviderRejectedError || row.attempts >= MAX_SEND_ATTEMPTS) {
         await db.query("update outbound_queue set status = 'failed', last_error = $2 where id = $1 and status = 'sending'", [row.id, message]);
         result.errors.push(`message ${row.id}: ${message}`);
