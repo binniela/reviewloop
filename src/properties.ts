@@ -29,6 +29,8 @@ export interface Property {
   ack_template: string;
   request_ack_template: string;
   followup_template: string;
+  guest_texts_paused_at: Date | null;
+  guest_texts_paused_by: string | null;
 }
 
 export async function getProperty(db: Db, id: string): Promise<Property> {
@@ -39,6 +41,30 @@ export async function getProperty(db: Db, id: string): Promise<Property> {
 
 export async function listProperties(db: Db): Promise<Property[]> {
   return db.query<Property>("select * from properties order by name");
+}
+
+/** Why a guest text can't go out right now while a GM has paused texting for the hotel. */
+export const PAUSED = "guest texts paused";
+/** How long held guest texts wait before checking again. */
+export const PAUSE_RECHECK_MS = 15 * 60_000;
+
+export async function guestTextsPaused(db: Db, propertyId: string): Promise<boolean> {
+  const [p] = await db.query<{ paused: boolean }>("select guest_texts_paused_at is not null as paused from properties where id = $1", [propertyId]);
+  return !!p?.paused;
+}
+
+/** True when this call paused it; false when it was already paused. */
+export async function pauseGuestTexts(db: Db, propertyId: string, by: string, now = new Date()): Promise<boolean> {
+  const rows = await db.query("update properties set guest_texts_paused_at = $2, guest_texts_paused_by = $3 where id = $1 and guest_texts_paused_at is null returning 1",
+    [propertyId, now.toISOString(), by]);
+  return rows.length > 0;
+}
+
+/** True when this call resumed it; false when it wasn't paused. */
+export async function resumeGuestTexts(db: Db, propertyId: string): Promise<boolean> {
+  const rows = await db.query("update properties set guest_texts_paused_at = null, guest_texts_paused_by = null where id = $1 and guest_texts_paused_at is not null returning 1",
+    [propertyId]);
+  return rows.length > 0;
 }
 
 /** The property's standard checkout time on the given local date, as a UTC instant. */

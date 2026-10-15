@@ -79,13 +79,17 @@ export async function hotelsPage(db: Db, flash?: Flash) {
       <h2>Hotels</h2>
       ${hotels.length
         ? html`<div class="table-wrap"><table>
-            <tr><th>Hotel</th><th>Texting number</th><th>Google</th><th>Replies</th><th></th></tr>
+            <tr><th>Hotel</th><th>Texting number</th><th>Google</th><th>Replies</th><th>Guest texts</th><th></th></tr>
             ${hotels.map(
               (h) => html`<tr>
                 <td><strong>${h.name}</strong></td>
                 <td>${h.sms_from ? phoneLabel(h.sms_from) : html`<span class="tag err">Not set</span>`}</td>
                 <td>${h.google_place_id ? html`<span class="tag good">Connected</span>` : html`<span class="tag err">Not set</span>`}</td>
                 <td>${REPLY_MODES.find(([m]) => m === h.reply_mode)?.[1] ?? h.reply_mode}</td>
+                <td>${h.guest_texts_paused_at
+                  ? html`<form method="post" action="/hotels/${h.id}/resume"><span class="tag err">Paused</span> <button type="submit" class="sm">Resume</button></form>`
+                  : html`<form method="post" action="/hotels/${h.id}/pause"><span class="tag good">On</span> <button type="submit" class="sm secondary"
+                      onclick="return confirm('Pause all guest texts for this hotel? Staff alerts still go out. Held texts send once you resume.')">Pause</button></form>`}</td>
                 <td><a href="/hotels/${h.id}">Edit</a></td>
               </tr>`,
             )}

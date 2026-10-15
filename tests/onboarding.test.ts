@@ -106,6 +106,40 @@ describe("report check", () => {
     expect(((await getProperty(db, "sunset")).report_mapping as { columns: { room: string } }).columns.room).toBe("Rm");
   });
 
+  it("says what the import will do: who becomes checked out and who can be texted", async () => {
+    const { app } = await setup();
+    const form = new FormData();
+    form.set("property", "sunset");
+    form.set("kind", "departures");
+    form.set("file", new File([DEPARTURES_CSV], "dep.csv"));
+    const check = await (await post(app, "/upload/check", form)).text();
+    expect(check).toContain("3 will be marked checked out");
+    expect(check).toContain("2 of 3 can be texted");
+  });
+
+  it("stops an arrivals file uploaded as Departures until someone confirms the guests have left", async () => {
+    const { app, db } = await setup(); // today is 10/14 at the hotel
+    const arrivals = `Confirmation,Guest Name,Phone,SMS Opt In,Room,Arrival,Departure
+3001,"Arr, Al",6265550301,Y,201,10/14/2026,10/16/2026
+3002,"Arr, Bo",6265550302,Y,202,10/15/2026,10/17/2026
+`;
+    const form = new FormData();
+    form.set("property", "sunset");
+    form.set("kind", "departures");
+    form.set("file", new File([arrivals], "arrivals.csv"));
+    const check = await (await post(app, "/upload/check", form)).text();
+    expect(check).toContain("haven’t arrived yet");
+    expect(check).toContain('name="confirm_kind"');
+
+    const unconfirmed = await post(app, "/upload", { property: "sunset", kind: "departures", csv: arrivals });
+    expect(unconfirmed.status).toBe(400);
+    expect((await db.query("select 1 from stays")).length).toBe(0);
+
+    const confirmed = await post(app, "/upload", { property: "sunset", kind: "departures", csv: arrivals, confirm_kind: "1" });
+    expect(await confirmed.text()).toContain("Report imported");
+    expect((await db.query("select 1 from stays")).length).toBe(2);
+  });
+
   it("flags a file with the wrong columns instead of importing nothing", async () => {
     const { app } = await setup();
     const form = new FormData();

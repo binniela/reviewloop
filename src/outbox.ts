@@ -1,12 +1,16 @@
-import { DeliveryUncertainError, ProviderRejectedError } from "./messaging.js";
+import { DeliveryUncertainError, ProviderConfigError, ProviderRejectedError } from "./messaging.js";
 import type { Db } from "./db.js";
 import { isOptedOut, sendAndLog, type SendOptions } from "./guest.js";
+import { guestTextsPaused, PAUSE_RECHECK_MS, PAUSED } from "./properties.js";
 import type { Messenger } from "./messaging.js";
 
 export const deferredMessenger: Messenger = {
   deferred: true,
   send: async () => { throw new Error("Deferred messages must be persisted before dispatch"); },
 };
+
+/** How often a text held by a credentials problem tries again. */
+const CONFIG_RETRY_MS = 5 * 60_000;
 
 /** About four hours of retries with the backoff below, then a person has to look at it on Operations. */
 export const MAX_SEND_ATTEMPTS = 8;
@@ -30,11 +34,24 @@ export async function dispatchOutbox(db: Db, messenger: Messenger, now = new Dat
         result.cancelled++;
         continue;
       }
+      // Held, not dropped: it goes out once when the GM resumes texting. Staff alerts never wait.
+      if (o.kind !== "alert" && await guestTextsPaused(db, o.property.id)) {
+        await db.query("update outbound_queue set status = 'pending', attempts = attempts - 1, next_attempt_at = $2, last_error = $3 where id = $1",
+          [row.id, new Date(now.getTime() + PAUSE_RECHECK_MS).toISOString(), PAUSED]);
+        continue;
+      }
       await sendAndLog(db, messenger, { ...o, outboxId: row.id, at: now, dedupeKey: `outbox:${row.id}` });
       await db.query("update outbound_queue set status = 'sent', sent_at = $2, last_error = null where id = $1", [row.id, now.toISOString()]);
       result.sent++;
     } catch (error) {
       const message = (error as Error).message;
+      if (error instanceof ProviderConfigError) {
+        // Not this message's fault: don't spend its retries, try again once the setting is fixed.
+        await db.query("update outbound_queue set status = 'pending', attempts = attempts - 1, next_attempt_at = $2, last_error = $3 where id = $1 and status = 'sending'",
+          [row.id, new Date(now.getTime() + CONFIG_RETRY_MS).toISOString(), message]);
+        result.errors.push(`message ${row.id}: ${message}`);
+        continue;
+      }
       if (error instanceof ProviderRejectedError || row.attempts >= MAX_SEND_ATTEMPTS) {
         await db.query("update outbound_queue set status = 'failed', last_error = $2 where id = $1 and status = 'sending'", [row.id, message]);
         result.errors.push(`message ${row.id}: ${message}`);

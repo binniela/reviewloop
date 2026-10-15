@@ -249,7 +249,8 @@ export type AuditAction =
   | "case.take" | "case.text" | "case.resolve" | "case.log" | "consent.approve"
   | "draft.approve" | "draft.post_failed" | "draft.dismiss" | "draft.restore"
   | "signin.password" | "signin.pin" | "signout.idle"
-  | "staff.add" | "staff.remove" | "staff.reset" | "staff.role" | "device.add" | "device.remove";
+  | "staff.add" | "staff.remove" | "staff.reset" | "staff.role" | "device.add" | "device.remove"
+  | "texts.pause" | "texts.resume";
 
 export async function audit(db: Db, who: Pick<Viewer, "id" | "name" | "device">, action: AuditAction, now: Date, subjectId?: string | null, detail?: string) {
   await db.query(

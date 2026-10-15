@@ -1,10 +1,10 @@
-import { DeliveryUncertainError, ProviderRejectedError } from "../messaging.js";
+import { DeliveryUncertainError, ProviderConfigError, ProviderRejectedError } from "../messaging.js";
 import { DateTime } from "luxon";
 import type { Db } from "../db.js";
 import type { Messenger } from "../messaging.js";
 import { getProperty, scheduledCheckout } from "../properties.js";
 import { sendReviewRequest, type JobOutcome } from "../reviews/requests.js";
-import { midStayTime, sendMidStay, sendWelcome } from "./inStay.js";
+import { isArrivalDay, midStayTime, sendMidStay, sendWelcome } from "./inStay.js";
 
 /**
  * Milestone engine. Turns stay events into scheduled jobs, then runs jobs when due.
@@ -73,7 +73,10 @@ async function applyEvent(db: Db, e: EventRow & { stay_id: string }) {
 
   if (e.type === "guest.checked_out") await cancelJobs(db, e.stay_id, ["welcome", "mid_stay"], "guest checked out");
 
-  if (e.type === "guest.checked_in") await scheduleJob(db, e.stay_id, "welcome", new Date(e.occurred_at));
+  // Only on the arrival day; a check-in we hear about the next morning gets the mid-stay text instead.
+  if (e.type === "guest.checked_in" && isArrivalDay(property, stay.arrival_date, new Date(e.occurred_at))) {
+    await scheduleJob(db, e.stay_id, "welcome", new Date(e.occurred_at));
+  }
 
   if (stay.status === "in_house" && (e.type === "guest.checked_in" || e.type === "reservation.modified")) {
     const mid = midStayTime(property, stay.arrival_date, stay.departure_date);
@@ -143,6 +146,13 @@ export async function runDueJobs(db: Db, deps: RunDeps): Promise<RunSummary> {
         : { status: "skipped", result: `no handler for ${job.kind}` };
     } catch (err) {
       const message = (err as Error).message;
+      if (err instanceof ProviderConfigError) {
+        // Our setup is broken, not this text: keep it waiting without using up its retries.
+        await db.query("update jobs set status = 'pending', run_at = $2, attempts = attempts - 1, result = $3, updated_at = now() where id = $1",
+          [job.id, new Date(now.getTime() + 15 * 60_000).toISOString(), `retrying: ${message}`]);
+        summary.retrying++;
+        continue;
+      }
       if (err instanceof DeliveryUncertainError || err instanceof ProviderRejectedError || job.attempts >= MAX_ATTEMPTS) {
         await finish(db, job.id, "failed", message);
         summary.failed++;

@@ -200,7 +200,7 @@ describe("deployment guards", () => {
   const live = {
     ADMIN_PASSWORD: "x", CRON_SECRET: "x", PUBLIC_URL: "https://x.example", DATABASE_URL: "postgres://x",
     MESSAGING_MODE: "live", TWILIO_ACCOUNT_SID: "AC", TWILIO_AUTH_TOKEN: "t",
-    GOOGLE_CLIENT_ID: "g", GOOGLE_CLIENT_SECRET: "g", GOOGLE_REFRESH_TOKEN: "g",
+    GOOGLE_CLIENT_ID: "g", GOOGLE_CLIENT_SECRET: "g", GOOGLE_REFRESH_TOKEN: "g", ANTHROPIC_API_KEY: "sk",
   };
 
   it("never lets a preview deployment text real guests", () => {
@@ -212,6 +212,10 @@ describe("deployment guards", () => {
   it("holds production to the full live configuration", () => {
     expect(() => validateRuntime({ ...live, VERCEL_ENV: "production" })).not.toThrow();
     expect(() => validateRuntime({ ...live, VERCEL_ENV: "production", MESSAGING_MODE: "console" })).toThrow();
+  });
+
+  it("won't run live without Claude, so guests never get the fallback template replies", () => {
+    expect(() => validateRuntime({ ...live, VERCEL_ENV: "production", ANTHROPIC_API_KEY: "" })).toThrow(/ANTHROPIC_API_KEY/);
   });
 
   it("only runs production as a demo when asked to", () => {

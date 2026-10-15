@@ -1,7 +1,8 @@
 import { DateTime } from "luxon";
 import type { Db } from "./db.js";
 import { lastTick, TICK_STALE_MS } from "./scheduler.js";
-import { listProperties } from "./properties.js";
+import { listProperties, PAUSED } from "./properties.js";
+import { CREDENTIALS_ERROR } from "./messaging.js";
 import { alertHealth, problemCounts, reportFreshness } from "./web/operations.js";
 
 /**
@@ -78,7 +79,7 @@ export async function alertStatus(db: Db, now: Date, opts: AlertOptions): Promis
   }
   if (counts.retrying) {
     const [last] = await db.query<{ last_error: string }>(
-      "select last_error from outbound_queue where status not in ('sent','cancelled') and last_error is not null order by next_attempt_at desc limit 1",
+      `select last_error from outbound_queue where status not in ('sent','cancelled') and last_error is not null and last_error <> '${PAUSED}' order by next_attempt_at desc limit 1`,
     );
     alerts.push({
       code: "texts_failing",
@@ -125,7 +126,30 @@ export async function alertStatus(db: Db, now: Date, opts: AlertOptions): Promis
     });
   }
 
+  const [creds] = await db.query<{ n: number }>(
+    `select ((select count(*) from outbound_queue where status = 'pending' and last_error like $1)
+           + (select count(*) from jobs where status = 'pending' and result like $2))::int as n`,
+    [`${CREDENTIALS_ERROR}%`, `retrying: ${CREDENTIALS_ERROR}%`],
+  );
+  if (creds?.n) {
+    alerts.push({
+      code: "provider_credentials",
+      severity: "critical",
+      title: "Texts can’t be sent: the text service refused our login",
+      detail: `${plural(creds.n, "text")} waiting. Check the Twilio (or Resend) credentials in the hosting settings; held texts go out once they’re fixed.`,
+    });
+  }
+
   const properties = await listProperties(db);
+  const paused = properties.filter((p) => p.guest_texts_paused_at);
+  if (paused.length) {
+    alerts.push({
+      code: "guest_texts_paused",
+      severity: "warning",
+      title: "Guest texts are paused",
+      detail: `${paused.map((p) => `${p.name} (by ${p.guest_texts_paused_by ?? "a GM"})`).join(", ")}: welcome, check-in, follow-up and review-request texts are held until you resume them on Hotel setup. Staff alerts still go out.`,
+    });
+  }
   const names = new Map(properties.map((p) => [p.id, p.name]));
   const syncRows = await db.query<{ key: string; value: string }>("select key, value from sync_state where key like 'reviews:%'");
   const failing: { name: string; error: string; critical: boolean }[] = [];

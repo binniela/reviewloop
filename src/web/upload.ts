@@ -1,6 +1,6 @@
 import { parse } from "csv-parse/sync";
 import { html } from "hono/html";
-import { parseAsiReport, parseMapping, type ReportKind, type ReportMapping } from "../ingest/asiReport.js";
+import { parseAsiReport, parseMapping, type ReportKind, type ReportMapping, type ReservationSnapshot } from "../ingest/asiReport.js";
 import type { Property } from "../properties.js";
 import { icon, layout, phoneLabel, statBox } from "./layout.js";
 import type { Freshness } from "./operations.js";
@@ -138,12 +138,55 @@ export function uploadPage(props: Property[], fresh: Freshness[], error?: string
   );
 }
 
+export interface ImportPreview {
+  checkedOut: number;
+  inHouse: number;
+  cancelled: number;
+  textable: number;
+  total: number;
+  /** Why this file probably isn't the report that was picked, if it looks wrong. */
+  wrongKind: string | null;
+}
+
+/**
+ * What importing will do, in the terms that matter: who becomes checked out (and so gets a review
+ * request), and who can be texted at all. A Departures pick whose guests mostly haven't arrived is
+ * almost always an Arrivals or Reservations file, and importing it would ask them for reviews.
+ */
+export function importPreview(reservations: ReservationSnapshot[], kind: ReportKind, today: string): ImportPreview {
+  const count = (f: (r: ReservationSnapshot) => boolean) => reservations.filter(f).length;
+  const checkedOut = reservations.filter((r) => r.status === "checked_out");
+  const notArrived = checkedOut.filter((r) => r.arrivalDate >= today).length;
+  const wrongKind = kind === "departures" && checkedOut.length && notArrived * 2 > checkedOut.length
+    ? `${notArrived} of these guests haven’t arrived yet (arrival today or later). This looks like an Arrivals or Reservations report, not Departures.`
+    : null;
+  return {
+    checkedOut: checkedOut.length,
+    inHouse: count((r) => r.status === "in_house"),
+    cancelled: count((r) => r.status === "cancelled" || r.status === "no_show"),
+    textable: count((r) => !!r.phone && r.smsOptIn),
+    total: reservations.length,
+    wrongKind,
+  };
+}
+
+function previewLines(v: ImportPreview) {
+  const lines = [
+    v.checkedOut ? `${v.checkedOut} will be marked checked out. Review requests start 2 hours after checkout.` : "",
+    v.inHouse ? `${v.inHouse} will be in house. Check-in texts are timed from this.` : "",
+    v.cancelled ? `${v.cancelled} cancelled or no-show. Their scheduled texts stop.` : "",
+    `${v.textable} of ${v.total} can be texted (mobile number and OK to text in this report; check-in sign-ups add more).`,
+  ].filter(Boolean);
+  return html`<ul class="import-preview">${lines.map((l) => html`<li>${l}</li>`)}</ul>`;
+}
+
 /** The check step: which column is which, and the first five guests as we read them. */
-export function checkPage(p: Property, kind: ReportKind, csv: string, mapping: ReportMapping | null, fileName: string) {
+export function checkPage(p: Property, kind: ReportKind, csv: string, mapping: ReportMapping | null, fileName: string, today: string, error?: string) {
   const { headers, rows, total } = peek(csv);
   const m = mapping ?? guessMapping(headers, parseMapping(p.report_mapping));
   const gaps = missing(m);
   const parsed = gaps.length ? null : parseAsiReport(csv, { kind, timezone: p.timezone, mapping: m });
+  const preview = parsed ? importPreview(parsed.reservations, kind, today) : null;
   const firstErrors = parsed?.errors.filter((e) => e.row <= 5) ?? [];
   const good = parsed?.reservations.length ?? 0;
   const ok = !!parsed && good > 0;
@@ -168,7 +211,14 @@ export function checkPage(p: Property, kind: ReportKind, csv: string, mapping: R
         <input type="hidden" name="file_name" value="${fileName}" />
         <textarea name="csv" hidden>${csv}</textarea>
         <p class="muted small">${fileName || "Your file"} · ${REPORT_LABEL[kind].name} · ${p.name}</p>
+        ${error ? html`<p class="err" role="alert">${error}</p>` : ""}
         ${verdict}
+        ${preview?.total ? previewLines(preview) : ""}
+        ${preview?.wrongKind
+          ? html`<div class="banner warn" role="alert">${icon("alert")}<strong>Check this is the ${REPORT_LABEL[kind].name} report.</strong>
+              <span>${preview.wrongKind}</span>
+              <label><input type="checkbox" name="confirm_kind" value="1" /> These guests have really left. Import as ${REPORT_LABEL[kind].name}.</label></div>`
+          : ""}
 
         <h2>The first five guests, as we read them</h2>
         ${parsed && (parsed.reservations.length || firstErrors.length)

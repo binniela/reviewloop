@@ -79,6 +79,30 @@ describe("in-stay milestones", () => {
     expect(h.to(GUEST).at(-1)!.body).toBe("Hi Jo, how is everything with your room so far? Reply here if anything needs attention.");
   });
 
+  it("doesn't send a welcome the morning after arrival when the in-house report comes in late", async () => {
+    const db = await testDb();
+    const h = harness(db, "2026-10-13T14:30:00Z"); // 7:30 AM PT, the day after the 10/12 arrival
+    await h.ingest(inHouse(), "in_house");
+    expect((await jobs(db)).map((j) => j.kind)).not.toContain("welcome");
+    h.set("2026-10-13T16:05:00Z");
+    await h.tick();
+    expect(h.to(GUEST)).toHaveLength(0);
+    h.set("2026-10-13T17:05:00Z");
+    await h.tick();
+    expect(h.to(GUEST).map((m) => m.body)).toEqual(["Hi Jo, how is everything with your room so far? Reply here if anything needs attention."]);
+  });
+
+  it("skips a queued welcome once the arrival day has passed", async () => {
+    const db = await testDb();
+    const h = harness(db, "2026-10-13T05:30:00Z"); // 10:30 PM PT on arrival day: quiet hours hold the welcome
+    await h.ingest(inHouse(), "in_house");
+    await h.tick();
+    h.set("2026-10-13T16:05:00Z"); // 9:05 AM next day
+    await h.tick();
+    expect(h.to(GUEST)).toHaveLength(0);
+    expect((await jobs(db)).find((j) => j.kind === "welcome")).toMatchObject({ status: "skipped", result: "arrived before today" });
+  });
+
   it("skips mid-stay for one-night stays and cancels in-stay messages at checkout", async () => {
     const db = await testDb();
     const h = harness(db, "2026-10-12T23:00:00Z");
@@ -198,6 +222,35 @@ describe("inbound texts", () => {
     const rr = (await jobs(db)).find((j) => j.kind === "review_request");
     expect(rr?.result).toMatch(/opted out/);
     expect((await h.text("start")).action).toBe("opted_in");
+  });
+
+  it("treats a plain-language opt-out like STOP: no reply to the guest, the desk is told", async () => {
+    const { db, h } = await setup();
+    const res = await h.text("Please stop texting me");
+    expect(res.action).toBe("opted_out");
+    expect(await db.query("select phone from opt_outs")).toEqual([{ phone: GUEST }]);
+    expect(h.to(GUEST)).toHaveLength(0);
+    expect(h.to(DESK)[0]!.body).toMatch(/^Jo Park, room 104 asked not to get texts/);
+    expect(await db.query("select 1 from recovery_cases")).toHaveLength(0);
+    // Nothing scheduled reaches them afterwards.
+    h.set("2026-10-14T17:05:00Z");
+    await h.tick();
+    expect(h.to(GUEST)).toHaveLength(0);
+  });
+
+  it.each(["don't text me anymore", "UNSUBSCRIBE me please", "No more texts", "remove me from this list", "stop please"])(
+    "records %j as an opt-out",
+    async (body) => {
+      const { db, h } = await setup();
+      expect((await h.text(body)).action).toBe("opted_out");
+      expect(await db.query("select 1 from opt_outs")).toHaveLength(1);
+    },
+  );
+
+  it.each(["Can you stop by with towels?", "The noise won't stop", "Stop by the desk later?"])("does not treat %j as an opt-out", async (body) => {
+    const { db, h } = await setup();
+    expect((await h.text(body)).action).not.toBe("opted_out");
+    expect(await db.query("select 1 from opt_outs")).toHaveLength(0);
   });
 
   it("forwards texts from numbers it can't match to a guest", async () => {

@@ -19,7 +19,7 @@ import { parseAsiReport, parseMapping, REPORT_KINDS, type ReportKind } from "./i
 import { reconcile } from "./ingest/reconcile.js";
 import type { Messenger } from "./messaging.js";
 import { processEvents, runDueJobs } from "./milestones/engine.js";
-import { getProperty, listProperties } from "./properties.js";
+import { getProperty, listProperties, pauseGuestTexts, resumeGuestTexts } from "./properties.js";
 import type { ReplyDrafter } from "./reviews/drafter.js";
 import type { ReviewSource } from "./reviews/sources.js";
 import { approveDraft, dismissDraft, syncReviews } from "./reviews/sync.js";
@@ -32,7 +32,8 @@ import { alertHealth, operationsPage, problemCounts, reportFreshness, schedulerH
 import { answer, topicFor, type Topic } from "./web/ask.js";
 import { checkinDone, checkinForm, qrSign } from "./web/public.js";
 import { hotelForm, hotelsPage, saveHotelForm, type HotelForm } from "./web/hotels.js";
-import { checkPage, importResultPage, mappingFromForm, uploadPage } from "./web/upload.js";
+import { checkPage, importPreview, importResultPage, mappingFromForm, uploadPage } from "./web/upload.js";
+import { DateTime } from "luxon";
 import { attemptsSoFar, clearLimit, rateLimited, sameOrigin } from "./security.js";
 import {
   activeGmCount, audit, bootstrapStaff, checkName, checkPassword, checkPin, checkUsername, createStaff, endSession,
@@ -695,6 +696,7 @@ export function createApp(deps: AppDeps) {
     );
   });
 
+  const hotelToday = (p: { timezone: string }) => DateTime.fromJSDate(now()).setZone(p.timezone).toISODate()!;
   app.get("/upload", async (c) => c.html(uploadPage(await listProperties(db), await reportFreshness(db, now()))));
 
   // Step 1 of an upload: read the file and show how it maps, without importing anything.
@@ -711,7 +713,7 @@ export function createApp(deps: AppDeps) {
     if (!csv.trim()) return back("Choose the CSV file exported from ASI.");
     try {
       const mapping = mappingFromForm(form, parseMapping(property.report_mapping));
-      return c.html(checkPage(property, kind, csv, mapping, name));
+      return c.html(checkPage(property, kind, csv, mapping, name, hotelToday(property)));
     } catch {
       return back("We couldn’t read that file as a CSV. Export the report from ASI as CSV (not Excel or PDF) and try again.");
     }
@@ -728,6 +730,13 @@ export function createApp(deps: AppDeps) {
     if (!property) return c.text("unknown hotel", 400);
     // Columns chosen on the check screen are remembered for this hotel's next upload.
     const mapping = mappingFromForm(form, parseMapping(property.report_mapping));
+    // An arrivals file picked as Departures would ask guests who haven't stayed for a review.
+    const parsed = parseAsiReport(csv, { kind, timezone: property.timezone, mapping: mapping ?? parseMapping(property.report_mapping) });
+    if (importPreview(parsed.reservations, kind, hotelToday(property)).wrongKind && form.confirm_kind !== "1") {
+      const name = typeof form.file_name === "string" ? form.file_name : "";
+      return c.html(checkPage(property, kind, csv, mapping, name, hotelToday(property),
+        "Nothing imported yet. Tick the box to confirm these guests have left, or choose the right report."), 400);
+    }
     if (mapping) {
       parseMapping(mapping);
       await db.query("update properties set report_mapping = $2 where id = $1", [property.id, JSON.stringify(mapping)]);
@@ -754,6 +763,19 @@ export function createApp(deps: AppDeps) {
       return c.html(hotelForm(existing, { values, error: (err as Error).message }), 400);
     }
   };
+  // One click stops every guest text for a hotel; held texts go out once on resume.
+  app.post("/hotels/:id/pause", async (c) => {
+    const id = c.req.param("id");
+    if (!(await getProperty(db, id).catch(() => null))) return c.notFound();
+    if (await pauseGuestTexts(db, id, c.get("user"), now())) await audit(db, c.get("viewer"), "texts.pause", now(), null, id);
+    return c.redirect("/hotels?ok=paused");
+  });
+  app.post("/hotels/:id/resume", async (c) => {
+    const id = c.req.param("id");
+    if (!(await getProperty(db, id).catch(() => null))) return c.notFound();
+    if (await resumeGuestTexts(db, id)) await audit(db, c.get("viewer"), "texts.resume", now(), null, id);
+    return c.redirect("/hotels?ok=resumed");
+  });
   app.post("/hotels", (c) => saveHotel(c, null));
   app.post("/hotels/:id", (c) => saveHotel(c, c.req.param("id")));
 
@@ -998,6 +1020,8 @@ const FLASH: Record<string, Flash> = {
   connected: { text: "Texts started. That guest can get texts from the desk now." },
   hotel_added: { text: "Hotel added. Next, set its texting number and Google listing." },
   hotel_saved: { text: "Saved." },
+  paused: { text: "Guest texts paused. Staff alerts still go out." },
+  resumed: { text: "Guest texts resumed. Held texts go out on the next run." },
   posted: { text: "Reply posted to Google." },
   dismissed: { text: "Draft dismissed. Nothing was posted." },
   restored: { text: "Draft is back in the queue." },
@@ -1019,6 +1043,7 @@ function sendError(raw: string): string {
   if (raw === "issue not found") return "This issue isn’t here anymore. Refresh the page.";
   if (raw.includes("opted out")) return "Not sent. This guest texted STOP, so we can’t text them. Call the room instead.";
   if (raw.includes("no SMS consent")) return "Not sent. This guest hasn’t agreed to texts. Call the room, or ask them to scan the QR sign at the desk.";
+  if (raw.includes("paused")) return "Not sent. Guest texts are paused for this hotel. Call the room, or ask your GM to resume texts.";
   if (raw.includes("no phone")) return "Not sent. We don’t have a mobile number for this guest. Call the room instead.";
   console.error("guest text failed:", raw);
   return "Not sent. The text service didn’t take it. Try again in a minute; if it keeps failing, call the room.";

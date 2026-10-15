@@ -35,8 +35,16 @@ export class DeliveryUncertainError extends Error {}
 export class ProviderRejectedError extends Error {
   constructor(message: string, readonly code: number | null) { super(message); }
 }
+/**
+ * The provider refused our credentials (a wrong or rotated token). Nothing is wrong with the
+ * message, so it waits and retries until someone fixes the setting, and Operations goes red.
+ */
+export class ProviderConfigError extends Error {}
+export const CREDENTIALS_ERROR = "Text provider rejected our credentials";
+
 /** Rate limits and server errors are worth retrying; any other 4xx is a final answer. */
 const permanent = (status: number) => status >= 400 && status < 500 && status !== 429;
+const credentials = (status: number) => status === 401 || status === 403;
 async function providerFetch(url: string, init: RequestInit) {
   try { return await fetch(url, { ...init, signal: AbortSignal.timeout(30_000) }); }
   catch (error) { throw new DeliveryUncertainError(`Provider send outcome unknown: ${(error as Error).message}`); }
@@ -70,6 +78,7 @@ export class TwilioSms {
     const json = (await providerJson(res)) as { sid?: string; message?: string; code?: number };
     if (!res.ok || !json.sid) {
       const message = `Twilio ${res.status}${json.code ? ` (code ${json.code})` : ""}: ${json.message ?? "send failed"}`;
+      if (credentials(res.status)) throw new ProviderConfigError(`${CREDENTIALS_ERROR}. ${message}`);
       throw permanent(res.status) ? new ProviderRejectedError(message, json.code ?? null) : new Error(message);
     }
     return json.sid;
@@ -90,6 +99,7 @@ export class ResendEmail {
     const json = (await providerJson(res)) as { id?: string; message?: string };
     if (!res.ok || !json.id) {
       const message = `Resend ${res.status}: ${json.message ?? "send failed"}`;
+      if (credentials(res.status)) throw new ProviderConfigError(`${CREDENTIALS_ERROR}. ${message}`);
       throw permanent(res.status) ? new ProviderRejectedError(message, null) : new Error(message);
     }
     return json.id;

@@ -46,9 +46,9 @@ describe("http app", () => {
     expect(await res.json()).toMatchObject({ created: 3, rows: 3, rowErrors: [] });
 
     const tick = (await (await app.request("/cron/tick", { headers: auth })).json()) as Record<string, any>;
-    expect(tick.jobs.done).toBe(3);
+    expect(tick.jobs).toMatchObject({ done: 2, skipped: 1 }); // one guest declined texts; no email fallback
     expect(tick.reviews.sunset).toMatchObject({ drafted: 1, awaitingApproval: 1 });
-    expect(messenger.sent).toHaveLength(3);
+    expect(messenger.sent).toHaveLength(2);
     const [d] = await db.query("select status from reply_drafts");
     expect(d).toEqual({ status: "pending" });
   });

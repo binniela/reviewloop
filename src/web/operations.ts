@@ -1,10 +1,13 @@
 import { html } from "hono/html";
 import { DateTime } from "luxon";
 import type { Db } from "../db.js";
-import { listProperties } from "../properties.js";
+import { listProperties, PAUSED } from "../properties.js";
 import { layout, timeAgo } from "./layout.js";
 import type { Alert } from "../alerts.js";
 import type { TickBeat } from "../scheduler.js";
+
+/** Texts held by a GM's pause are waiting on purpose, not failing. */
+const FAILING = `status = 'pending' and last_error is not null and last_error <> '${PAUSED}'`;
 
 /**
  * Operations: is everything that runs on its own actually running? Report freshness, the Google
@@ -74,7 +77,7 @@ export async function problemCounts(db: Db, now: Date) {
   const [c] = await db.query<{ undelivered: number; retrying: number; unsent: number; escalations: number; followups: number; jobs: number; sync: number }>(
     `select
        (select count(*)::int from sms_delivery_receipts where status in ('failed','undelivered') and updated_at > $1::timestamptz - interval '24 hours') as undelivered,
-       (select count(*)::int from outbound_queue where status = 'pending' and last_error is not null) as retrying,
+       (select count(*)::int from outbound_queue where ${FAILING}) as retrying,
        (select count(*)::int from outbound_queue where status in ('failed', 'cancelled') and last_error <> 'guest opted out'
           and locked_at > $1::timestamptz - interval '7 days') as unsent,
        (select count(*)::int from recovery_cases where escalation_error is not null and resolved_at is null) as escalations,
@@ -103,7 +106,7 @@ export async function operationsPage(db: Db, now: Date, alerts: Alert[], beat: T
   );
   const retrying = await db.query<{ attempts: number; next_attempt_at: Date; last_error: string; to: string; body: string; kind: string }>(
     `select attempts, next_attempt_at, last_error, payload->>'to' as "to", payload->>'body' as body, payload->>'kind' as kind
-       from outbound_queue where status = 'pending' and last_error is not null order by next_attempt_at limit 50`,
+       from outbound_queue where ${FAILING} order by next_attempt_at limit 50`,
   );
   const unsent = await db.query<{ attempts: number; locked_at: Date; last_error: string; to: string; body: string }>(
     `select attempts, locked_at, last_error, payload->>'to' as "to", payload->>'body' as body
