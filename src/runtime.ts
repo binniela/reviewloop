@@ -25,4 +25,7 @@ export function validateRuntime(env: NodeJS.ProcessEnv = process.env) {
   if (![env.GOOGLE_CLIENT_ID, env.GOOGLE_CLIENT_SECRET, env.GOOGLE_REFRESH_TOKEN].every(Boolean)) {
     throw new Error("Production/live mode requires Google credentials; mock reviews are local-only");
   }
+  // Without Claude, replies come from fixed templates and guest texts are triaged by keywords only.
+  // Fine for a demo; not for a hotel's public Google replies.
+  if (!env.ANTHROPIC_API_KEY?.trim()) throw new Error("ANTHROPIC_API_KEY is required in production/live mode");
 }

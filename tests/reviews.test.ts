@@ -168,6 +168,18 @@ describe("drafters", () => {
     expect(await t.draft(ctx(1))).toMatch(/sorry/);
   });
 
+  it("template drafter doesn't apologize to a 4 or 5 star review that mentions a fixed problem", async () => {
+    const draft = await new TemplateDrafter().draft({
+      property: { name: "Sunset Inn", voice_notes: "", signoff: "Raj" },
+      review: { author: "Anita P", rating: 4, body: "AC was loud the first night but they moved us right away and checked back in. Friendly staff." },
+      stayNotes: [],
+      voiceExamples: [],
+    });
+    expect(draft).not.toMatch(/sorry|problems/i);
+    expect(draft).not.toMatch(/glad you enjoyed/);
+    expect(draft).toMatch(/^Thank you, Anita\./);
+  });
+
   it("cleanDraft strips wrapping quotes and dashes", () => {
     expect(cleanDraft('"Thanks — see you soon"')).toBe("Thanks, see you soon");
   });

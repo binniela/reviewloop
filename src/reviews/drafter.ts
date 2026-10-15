@@ -80,7 +80,12 @@ export class TemplateDrafter implements ReplyDrafter {
     const sign = ctx.property.signoff ? `\n${ctx.property.signoff}` : "";
     const r = ctx.review.rating ?? 3;
     const classification = await new KeywordClassifier().classify(ctx.review.body ?? "");
-    if (classification.sentiment === "negative" || /\b(but|however|although)\b/i.test(ctx.review.body ?? "")) {
+    const mixed = classification.sentiment === "negative" || /\b(but|however|although)\b/i.test(ctx.review.body ?? "");
+    // A happy rating that mentions a problem: neither apologize nor claim a perfect stay.
+    if (mixed && r >= 4) {
+      return `${hi} We appreciate you taking the time to share this, and we hope to welcome you back to ${ctx.property.name}.${sign}`;
+    }
+    if (mixed) {
       return `${hi} We're sorry there were problems during your stay at ${ctx.property.name}. Please contact the front desk so we can discuss what happened.${sign}`;
     }
     if (r >= 4) return `${hi} We're glad you enjoyed your stay at ${ctx.property.name} and hope to see you again soon.${sign}`;
