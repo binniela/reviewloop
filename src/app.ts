@@ -32,7 +32,8 @@ import { alertHealth, operationsPage, problemCounts, reportFreshness, schedulerH
 import { answer, topicFor, type Topic } from "./web/ask.js";
 import { checkinDone, checkinForm, qrSign } from "./web/public.js";
 import { hotelForm, hotelsPage, saveHotelForm, type HotelForm } from "./web/hotels.js";
-import { checkPage, importResultPage, mappingFromForm, uploadPage } from "./web/upload.js";
+import { checkPage, importPreview, importResultPage, mappingFromForm, uploadPage } from "./web/upload.js";
+import { DateTime } from "luxon";
 import { attemptsSoFar, clearLimit, rateLimited, sameOrigin } from "./security.js";
 import {
   activeGmCount, audit, bootstrapStaff, checkName, checkPassword, checkPin, checkUsername, createStaff, endSession,
@@ -695,6 +696,7 @@ export function createApp(deps: AppDeps) {
     );
   });
 
+  const hotelToday = (p: { timezone: string }) => DateTime.fromJSDate(now()).setZone(p.timezone).toISODate()!;
   app.get("/upload", async (c) => c.html(uploadPage(await listProperties(db), await reportFreshness(db, now()))));
 
   // Step 1 of an upload: read the file and show how it maps, without importing anything.
@@ -711,7 +713,7 @@ export function createApp(deps: AppDeps) {
     if (!csv.trim()) return back("Choose the CSV file exported from ASI.");
     try {
       const mapping = mappingFromForm(form, parseMapping(property.report_mapping));
-      return c.html(checkPage(property, kind, csv, mapping, name));
+      return c.html(checkPage(property, kind, csv, mapping, name, hotelToday(property)));
     } catch {
       return back("We couldn’t read that file as a CSV. Export the report from ASI as CSV (not Excel or PDF) and try again.");
     }
@@ -728,6 +730,13 @@ export function createApp(deps: AppDeps) {
     if (!property) return c.text("unknown hotel", 400);
     // Columns chosen on the check screen are remembered for this hotel's next upload.
     const mapping = mappingFromForm(form, parseMapping(property.report_mapping));
+    // An arrivals file picked as Departures would ask guests who haven't stayed for a review.
+    const parsed = parseAsiReport(csv, { kind, timezone: property.timezone, mapping: mapping ?? parseMapping(property.report_mapping) });
+    if (importPreview(parsed.reservations, kind, hotelToday(property)).wrongKind && form.confirm_kind !== "1") {
+      const name = typeof form.file_name === "string" ? form.file_name : "";
+      return c.html(checkPage(property, kind, csv, mapping, name, hotelToday(property),
+        "Nothing imported yet. Tick the box to confirm these guests have left, or choose the right report."), 400);
+    }
     if (mapping) {
       parseMapping(mapping);
       await db.query("update properties set report_mapping = $2 where id = $1", [property.id, JSON.stringify(mapping)]);
